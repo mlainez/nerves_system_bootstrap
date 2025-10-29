@@ -1,0 +1,5 @@
+nerves_system*
+
+_build/
+deps
+buildroot
