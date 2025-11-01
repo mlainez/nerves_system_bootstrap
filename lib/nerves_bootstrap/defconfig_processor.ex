@@ -164,17 +164,34 @@ defmodule NervesBootstrap.DefconfigProcessor do
   Copies and processes kernel defconfig from Buildroot to target directory.
   """
   def copy_kernel_defconfig(defconfig_path, buildroot_path, target_dir) do
-    defconfig = File.read!(defconfig_path)
+    initial_defconfig = File.read!(defconfig_path)
 
-    # Extract kernel version
-    kernel_version = case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="([^"]+)"/, defconfig) do
-      [_, version] -> version
+    # Extract kernel version and validate against Buildroot support
+    kernel_version = case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="([^"]+)"/, initial_defconfig) do
+      [_, version] ->
+        validated_version = validate_kernel_version_against_buildroot(version, buildroot_path)
+        if validated_version != version do
+          Mix.shell().info("⚠️ Kernel version #{version} not supported by this Buildroot version, using #{validated_version}")
+          # Update defconfig with the validated version
+          updated_defconfig = String.replace(initial_defconfig,
+            "BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=\"#{version}\"",
+            "BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=\"#{validated_version}\""
+          )
+          File.write!(defconfig_path, updated_defconfig)
+          Mix.shell().info("✅ Updated #{defconfig_path} with kernel version #{validated_version}")
+          validated_version
+        else
+          version
+        end
       _ ->
-        case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="[^"]*linux-([^"\/]+)\.tar\.[^"]+"/, defconfig) do
+        case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="[^"]*linux-([^"\/]+)\.tar\.[^"]+"/, initial_defconfig) do
           [_, version] -> version
-          _ -> "6.1.55"  # Default fallback
+          _ -> get_default_kernel_version_for_buildroot(buildroot_path)
         end
     end
+
+    # Re-read the defconfig after potential updates
+    defconfig = File.read!(defconfig_path)
 
     target_kernel_defconfig = Path.join(target_dir, "linux-#{kernel_version}.defconfig")
 
@@ -444,4 +461,115 @@ defmodule NervesBootstrap.DefconfigProcessor do
     Mix.shell().info("✅ Updated nerves_defconfig to use custom kernel config: ${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig")
   end
 
+  # Validates kernel version against what's supported by the local Buildroot version.
+  # Returns the original version if supported, or a compatible version if not.
+  defp validate_kernel_version_against_buildroot(kernel_version, buildroot_path) do
+    supported_versions = get_supported_kernel_versions_from_hash(buildroot_path)
+
+    if kernel_version in supported_versions do
+      kernel_version
+    else
+      # Find the highest supported version that's compatible
+      requested_major_minor = extract_major_minor_version(kernel_version)
+
+      # Try to find a version with same major.minor
+      compatible_version = supported_versions
+      |> Enum.filter(fn v -> extract_major_minor_version(v) == requested_major_minor end)
+      |> Enum.sort_by(&version_to_sortable/1, :desc)
+      |> List.first()
+
+      case compatible_version do
+        nil ->
+          # No compatible version found, use the highest supported version
+          latest_supported = supported_versions
+          |> Enum.sort_by(&version_to_sortable/1, :desc)
+          |> List.first()
+
+          Mix.shell().info("⚠️ No compatible kernel version found for #{kernel_version}, using latest supported: #{latest_supported}")
+          latest_supported || get_default_kernel_version_for_buildroot(buildroot_path)
+
+        version ->
+          version
+      end
+    end
+  end
+
+  # Gets supported kernel versions from the local Buildroot's package/linux/ files.
+  # In practice, Buildroot supports a wide range of kernel versions, so we use
+  # a conservative approach with known LTS versions for the validation.
+  defp get_supported_kernel_versions_from_hash(buildroot_path) do
+    # Try multiple potential locations for Linux package information
+    potential_paths = [
+      Path.join([buildroot_path, "package", "linux", "linux.hash"]),
+      Path.join([buildroot_path, "package", "linux-headers", "linux-headers.hash"]),
+      Path.join([buildroot_path, "linux", "linux.hash"])
+    ]
+
+    versions_from_file = Enum.find_value(potential_paths, fn path ->
+      if File.exists?(path) do
+        content = File.read!(path)
+
+        # Extract versions from hash file
+        # Format: sha256 hash_value linux-X.Y.Z.tar.xz
+        versions = content
+        |> String.split("\n")
+        |> Enum.filter(fn line -> String.contains?(line, "linux-") and String.ends_with?(line, ".tar.xz") end)
+        |> Enum.map(fn line ->
+          case Regex.run(~r/linux-([0-9]+\.[0-9]+\.[0-9]+)\.tar\.xz/, line) do
+            [_, version] -> version
+            _ -> nil
+          end
+        end)
+        |> Enum.filter(&(&1 != nil))
+        |> Enum.uniq()
+        |> Enum.sort_by(&version_to_sortable/1, :desc)
+
+        if length(versions) > 0 do
+          Mix.shell().info("📋 Found #{length(versions)} supported kernel versions in Buildroot #{path}")
+          versions
+        else
+          nil
+        end
+      else
+        nil
+      end
+    end)
+
+    # Use file versions if found, otherwise fallback to known LTS versions
+    if versions_from_file do
+      versions_from_file
+    else
+      Mix.shell().info("⚠️ Could not find kernel version information in Buildroot, using known LTS versions")
+      ["6.6.93", "6.6.58", "6.1.114", "5.15.170", "5.10.227", "5.4.285", "4.19.323"]
+    end
+  end
+
+  # Gets the default kernel version for a Buildroot installation.
+  defp get_default_kernel_version_for_buildroot(buildroot_path) do
+    supported_versions = get_supported_kernel_versions_from_hash(buildroot_path)
+
+    # Try to find an LTS version first (6.6, 6.1, 5.15, 5.10, 5.4, 4.19)
+    lts_version = supported_versions
+    |> Enum.find(fn version ->
+      major_minor = extract_major_minor_version(version)
+      major_minor in ["6.6", "6.1", "5.15", "5.10", "5.4", "4.19"]
+    end)
+
+    lts_version || List.first(supported_versions) || "6.1.55"
+  end
+
+  defp extract_major_minor_version(version) do
+    case String.split(version, ".") do
+      [major, minor, _patch] -> "#{major}.#{minor}"
+      [major, minor] -> "#{major}.#{minor}"
+      _ -> version
+    end
+  end
+
+  defp version_to_sortable(version) do
+    version
+    |> String.split(".")
+    |> Enum.map(&String.to_integer/1)
+    |> List.to_tuple()
+  end
 end
