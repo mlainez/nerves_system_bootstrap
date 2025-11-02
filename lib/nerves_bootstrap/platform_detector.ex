@@ -57,8 +57,11 @@ defmodule NervesBootstrap.PlatformDetector do
     dtb_name = extract_dtb_name(defconfig)
 
     cond do
-      # Raspberry Pi detection
-      String.contains?(defconfig, "rpi") or String.contains?(defconfig, "BR2_PACKAGE_RPI") ->
+      # Raspberry Pi detection (more specific to avoid false positives)
+      (String.contains?(defconfig, "rpi") and not String.contains?(defconfig, "rpiv2")) or
+      String.contains?(defconfig, "BR2_PACKAGE_RPI") or
+      String.contains?(defconfig, "bcm27") or
+      String.contains?(defconfig, "raspberrypi") ->
         %{
           platform: :rpi,
           uboot_env_size: "0x20000",

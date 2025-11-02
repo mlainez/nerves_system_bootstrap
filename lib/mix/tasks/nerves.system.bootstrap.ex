@@ -14,12 +14,13 @@ defmodule Mix.Tasks.Nerves.System.Bootstrap do
   fwup configuration, toolchain setup, and Nerves-specific enhancements.
 
   Usage:
-      mix nerves.system.bootstrap <board> [--buildroot PATH] [--buildroot-url URL]
+      mix nerves.system.bootstrap <board> [--buildroot PATH] [--buildroot-url URL] [--buildroot-branch BRANCH]
 
   Examples:
       mix nerves.system.bootstrap beaglebone
       mix nerves.system.bootstrap pine64 --buildroot ~/src/buildroot-fork
       mix nerves.system.bootstrap pine64 --buildroot-url https://github.com/buildroot/buildroot.git
+      mix nerves.system.bootstrap pine64 --buildroot-url https://github.com/buildroot/buildroot.git --buildroot-branch 2025.05.3
 
   Generated files include:
     - nerves_defconfig with complete Nerves configuration
@@ -35,13 +36,16 @@ defmodule Mix.Tasks.Nerves.System.Bootstrap do
   and configures the appropriate Nerves toolchain and fwup settings.
   """
 
-  @impl true
+    @impl true
   def run(argv) do
-    {opts, positional, _} =
-      OptionParser.parse(argv, switches: [buildroot: :string, "buildroot-url": :string])
+    {opts, positional, _invalid} =
+      OptionParser.parse(argv, switches: [buildroot: :string, buildroot_url: :string, buildroot_branch: :string])
 
     case positional do
-      [board] ->
+      [board_input] ->
+        # Nettoyer le nom du board si il se termine par _defconfig
+        board = String.replace_suffix(board_input, "_defconfig", "")
+
         # 1. Determine and prepare Buildroot
         buildroot_path = BuildrootManager.determine_buildroot(opts)
 
@@ -66,19 +70,22 @@ defmodule Mix.Tasks.Nerves.System.Bootstrap do
         # 5. Copy kernel defconfig
         DefconfigProcessor.copy_kernel_defconfig(defconfig_path, buildroot_path, app)
 
-        # 6. Resolve toolchain
+        # 6. Copy U-Boot configuration fragments
+        DefconfigProcessor.copy_uboot_fragments(target_defconfig, buildroot_path, app)
+
+        # 7. Resolve toolchain
         toolchain_dep = PlatformDetector.infer_toolchain(defconfig_path)
         module_name = Macro.camelize(app)
 
-        # 7. Generate all files using templates
+        # 8. Generate all files using templates
         FileGenerator.generate_files(app, board, module_name, toolchain_dep, buildroot_path)
 
-        # 8. Success message
+        # 9. Success message
         display_success_message(app, board)
 
       _ ->
         Mix.raise("""
-        Usage: mix nerves.system.bootstrap <board> [--buildroot PATH] [--buildroot-url URL]
+        Usage: mix nerves.system.bootstrap <board> [--buildroot PATH] [--buildroot-url URL] [--buildroot-branch BRANCH]
         """)
     end
   end

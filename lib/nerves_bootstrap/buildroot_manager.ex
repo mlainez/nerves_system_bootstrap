@@ -14,25 +14,75 @@ defmodule NervesBootstrap.BuildrootManager do
       buildroot = opts[:buildroot] ->
         Path.expand(buildroot)
 
-      true ->
-        url = opts[:"buildroot-url"] || @default_buildroot_url
+      url = opts[:buildroot_url] ->
+        # If the user provided a specific URL, allow an optional branch via
+        # --buildroot-branch. If none provided, clone the repository's
+        # default branch.
         path = "buildroot"
-        download_buildroot(url, path)
+        branch = opts[:buildroot_branch]
+        download_buildroot(url, path, branch)
+        Path.expand(path)
+
+      true ->
+        # Default behaviour: use the buildroot version referenced by
+        # nerves_system_br (keeps previous behaviour for backwards compat).
+        url = @default_buildroot_url
+        path = "buildroot"
+        version = get_nerves_br_version()
+        download_buildroot(url, path, version)
         Path.expand(path)
     end
   end
 
   @doc """
   Downloads Buildroot from the specified URL to the target path.
-  Uses the same version as nerves_system_br.
+  If a branch_or_version is provided, this will be passed to git clone --branch.
+  If branch_or_version is nil, the repository default branch is cloned.
   """
-  def download_buildroot(url, path) do
-    unless File.exists?(path) do
-      version = get_nerves_br_version()
-      Mix.shell().info("📥 Downloading Buildroot #{version} from #{url}...")
-      {_, 0} = System.cmd("git", ["clone", "--branch", version, "--depth", "1", url, path])
-      Mix.shell().info("✅ Buildroot #{version} downloaded to #{path}")
+  def download_buildroot(url, path, branch_or_version \\ nil) do
+    if File.exists?(path) do
+      # Check if existing directory is from the correct URL
+      current_url = get_git_remote_url(path)
+
+      if current_url && normalize_git_url(current_url) == normalize_git_url(url) do
+        Mix.shell().info("✅ Buildroot already exists from correct repository: #{url}")
+      else
+        Mix.shell().info("🔄 Removing existing Buildroot (different repository)")
+        File.rm_rf!(path)
+        clone_buildroot(url, path, branch_or_version)
+      end
+    else
+      clone_buildroot(url, path, branch_or_version)
     end
+  end
+
+  defp clone_buildroot(url, path, branch_or_version) do
+    case branch_or_version do
+      nil ->
+        Mix.shell().info("📥 Cloning Buildroot from #{url}...")
+        {_, 0} = System.cmd("git", ["clone", "--depth", "1", url, path])
+        Mix.shell().info("✅ Buildroot cloned to #{path}")
+
+      branch ->
+        Mix.shell().info("📥 Downloading Buildroot #{branch} from #{url}...")
+        {_, 0} = System.cmd("git", ["clone", "--branch", branch, "--depth", "1", url, path])
+        Mix.shell().info("✅ Buildroot #{branch} downloaded to #{path}")
+    end
+  end
+
+  defp get_git_remote_url(path) do
+    case System.cmd("git", ["remote", "get-url", "origin"], cd: path, stderr_to_stdout: true) do
+      {url, 0} -> String.trim(url)
+      _ -> nil
+    end
+  end
+
+  defp normalize_git_url(url) do
+    url
+    |> String.replace_suffix(".git", "")
+    |> String.replace(~r{^https?://}, "")
+    |> String.replace(~r{^git@([^:]+):}, "\\1/")
+    |> String.downcase()
   end
 
   @doc """
