@@ -10,7 +10,19 @@ defmodule NervesBootstrap.FileGenerator do
   @doc """
   Generates all files for the Nerves system using templates.
   """
-  def generate_files(app, board, module_name, toolchain_dep, buildroot_path, defconfig_path) do
+  def generate_files(
+        app,
+        board,
+        module_name,
+        toolchain_dep,
+        buildroot_path,
+        defconfig_path,
+        external_path \\ nil
+      ) do
+    # Copy custom packages from external tree before generating templates
+    # (so Config.in can reference them)
+    custom_packages = copy_custom_packages(app, external_path)
+
     # Prepare template binding variables
     binding =
       prepare_template_binding(
@@ -19,7 +31,8 @@ defmodule NervesBootstrap.FileGenerator do
         module_name,
         toolchain_dep,
         buildroot_path,
-        defconfig_path
+        defconfig_path,
+        custom_packages
       )
 
     # Generate files from templates
@@ -38,7 +51,8 @@ defmodule NervesBootstrap.FileGenerator do
          module_name,
          toolchain_dep,
          buildroot_path,
-         defconfig_path
+         defconfig_path,
+         custom_packages
        ) do
     nerves_defconfig_path = Path.join(app, "nerves_defconfig")
     platform_config = NervesBootstrap.PlatformDetector.detect_platform_config(defconfig_path)
@@ -64,6 +78,7 @@ defmodule NervesBootstrap.FileGenerator do
       arch_config: arch_config,
       dtso_names: dtso_names,
       partition_guids: partition_guids,
+      custom_packages: custom_packages,
       dep_string: fn {name, version} -> "{:#{name}, \"#{version}\", runtime: false}" end,
       architecture: get_architecture(toolchain_dep),
       # This could be configurable
@@ -394,6 +409,50 @@ defmodule NervesBootstrap.FileGenerator do
     :io_lib.format("~8.16.0b-~4.16.0b-~4.16.0b-~4.16.0b-~12.16.0b", [a, b, c, d, e])
     |> List.to_string()
     |> String.downcase()
+  end
+
+  # Copy custom packages from an external tree into the generated system.
+  # Returns a list of package name strings that were copied.
+  defp copy_custom_packages(_app, nil), do: []
+
+  defp copy_custom_packages(app, external_path) do
+    package_dir = Path.join(external_path, "package")
+
+    if File.dir?(package_dir) do
+      package_dir
+      |> File.ls!()
+      |> Enum.filter(fn entry ->
+        Path.join(package_dir, entry) |> File.dir?()
+      end)
+      |> Enum.filter(fn pkg_name ->
+        # Only copy packages that have at least a .mk file (valid Buildroot package)
+        mk_files = Path.wildcard(Path.join([package_dir, pkg_name, "*.mk"]))
+        length(mk_files) > 0
+      end)
+      |> Enum.map(fn pkg_name ->
+        src = Path.join(package_dir, pkg_name)
+        dest = Path.join([app, "package", pkg_name])
+        File.mkdir_p!(dest)
+
+        # Copy all files in the package directory
+        src
+        |> File.ls!()
+        |> Enum.each(fn file ->
+          src_file = Path.join(src, file)
+          dest_file = Path.join(dest, file)
+
+          unless File.dir?(src_file) do
+            File.cp!(src_file, dest_file)
+          end
+        end)
+
+        Mix.shell().info("Copied custom package: #{pkg_name}")
+        pkg_name
+      end)
+      |> Enum.sort()
+    else
+      []
+    end
   end
 
   # Generate GUIDs for all partitions based on platform configuration

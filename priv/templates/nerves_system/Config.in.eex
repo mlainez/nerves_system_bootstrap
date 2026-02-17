@@ -2,3 +2,6 @@
 #
 # If these are non-proprietary, please consider contributing them back to
 # Nerves or Buildroot.
+<%= for pkg <- custom_packages do %>
+source "$BR2_EXTERNAL_<%= String.upcase(app) %>_PATH/package/<%= pkg %>/Config.in"
+<% end %>

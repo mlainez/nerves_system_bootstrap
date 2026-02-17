@@ -109,7 +109,8 @@ defmodule Mix.Tasks.Nerves.System.Bootstrap do
       module_name,
       toolchain_dep,
       buildroot_path,
-      defconfig_path
+      defconfig_path,
+      external_path
     )
 
     display_success_message(app, board)
