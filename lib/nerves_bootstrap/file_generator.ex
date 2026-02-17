@@ -59,7 +59,8 @@ defmodule NervesBootstrap.FileGenerator do
     arch_config = NervesBootstrap.PlatformDetector.get_arch_config(toolchain_dep)
 
     # Analyze genimage config to update platform_config with partition scheme
-    platform_config = analyze_and_update_platform_config(platform_config, buildroot_path, board)
+    platform_config =
+      analyze_and_update_platform_config(platform_config, buildroot_path, board, defconfig_path)
 
     # Extract DTSO names from nerves_defconfig if it exists
     dtso_names = extract_dtso_names(nerves_defconfig_path)
@@ -248,42 +249,96 @@ defmodule NervesBootstrap.FileGenerator do
     end
   end
 
-  defp analyze_and_update_platform_config(platform_config, buildroot_path, board) do
-    # Find buildroot board directory
-    case find_buildroot_board_directory(buildroot_path, board) do
+  defp analyze_and_update_platform_config(platform_config, buildroot_path, board, defconfig_path) do
+    # Try to find board directory: first from defconfig content, then by name matching
+    board_dir =
+      extract_board_dir_from_defconfig(buildroot_path, defconfig_path) ||
+        find_buildroot_board_directory(buildroot_path, board)
+
+    case board_dir do
       nil ->
         Mix.shell().info("No buildroot board directory found for #{board}, using defaults")
         platform_config
 
-      board_dir ->
-        genimage_files = Path.wildcard(Path.join(board_dir, "genimage*.cfg"))
+      dir ->
+        detect_partition_scheme(platform_config, dir)
+    end
+  end
 
-        if length(genimage_files) > 0 do
-          genimage_file = hd(genimage_files)
-          content = File.read!(genimage_file)
+  # Extracts the board directory from defconfig content by looking at
+  # BR2_ROOTFS_POST_BUILD_SCRIPT, BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE, etc.
+  # These paths explicitly reference the board directory (e.g., "board/qemu/x86_64/post-build.sh").
+  defp extract_board_dir_from_defconfig(buildroot_path, defconfig_path) do
+    content = File.read!(defconfig_path)
 
-          partition_scheme =
-            cond do
-              String.contains?(content, "gpt = true") or
-                  String.contains?(content, "partition-table-type = \"gpt\"") ->
-                :gpt
+    # Try multiple keys that reference board directories
+    board_path_patterns = [
+      ~r/BR2_ROOTFS_POST_BUILD_SCRIPT="([^"]*board\/[^"]+)"/,
+      ~r/BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="([^"]*board\/[^"]+)"/,
+      ~r/BR2_ROOTFS_POST_IMAGE_SCRIPT="([^"]*board\/[^"]+)"/
+    ]
 
-              String.contains?(content, "efi") ->
-                :efi
+    board_dir =
+      Enum.find_value(board_path_patterns, fn pattern ->
+        case Regex.run(pattern, content) do
+          [_, path] ->
+            # Extract the board directory from the file path
+            # e.g., "board/qemu/x86_64-efi/post-build.sh" -> "board/qemu/x86_64-efi"
+            # Handle space-separated lists (e.g., "board/a/post.sh board/b/post.sh")
+            first_path = path |> String.split(" ") |> Enum.find(&String.contains?(&1, "board/"))
 
-              true ->
-                :mbr
+            if first_path do
+              Path.dirname(first_path)
             end
 
-          Mix.shell().info(
-            "Detected #{partition_scheme} partition scheme from #{Path.basename(genimage_file)}"
-          )
-
-          Map.put(platform_config, :partition_scheme, partition_scheme)
-        else
-          Mix.shell().info("No genimage config found in #{board_dir}, using default MBR")
-          platform_config
+          _ ->
+            nil
         end
+      end)
+
+    if board_dir do
+      full_path = Path.join(buildroot_path, board_dir)
+
+      if File.dir?(full_path) do
+        Mix.shell().info("Found board directory from defconfig: #{board_dir}")
+        full_path
+      else
+        nil
+      end
+    end
+  end
+
+  defp detect_partition_scheme(platform_config, board_dir) do
+    # Buildroot uses both genimage.cfg and genimage.cfg.in templates
+    genimage_files =
+      Path.wildcard(Path.join(board_dir, "genimage*.cfg")) ++
+        Path.wildcard(Path.join(board_dir, "genimage*.cfg.in"))
+
+    if length(genimage_files) > 0 do
+      genimage_file = hd(genimage_files)
+      content = File.read!(genimage_file)
+
+      partition_scheme =
+        cond do
+          String.contains?(content, "gpt = true") or
+              String.contains?(content, "partition-table-type = \"gpt\"") ->
+            :gpt
+
+          String.contains?(content, "efi") ->
+            :efi
+
+          true ->
+            :mbr
+        end
+
+      Mix.shell().info(
+        "Detected #{partition_scheme} partition scheme from #{Path.basename(genimage_file)}"
+      )
+
+      Map.put(platform_config, :partition_scheme, partition_scheme)
+    else
+      Mix.shell().info("No genimage config found in #{board_dir}, using defaults")
+      platform_config
     end
   end
 
@@ -309,13 +364,16 @@ defmodule NervesBootstrap.FileGenerator do
       # List all directories first for debugging
       all_dirs = Path.wildcard(Path.join(board_base_dir, "**/"))
 
-      # Search recursively for directories containing genimage.cfg or boot.cmd
+      # Search recursively for directories containing genimage.cfg(.in) or boot.cmd
       # This approach is generic and will work for any board layout
       relevant_dirs =
         all_dirs
         |> Enum.filter(fn dir ->
           # Check if directory contains files we're interested in
-          has_genimage = length(Path.wildcard(Path.join(dir, "genimage*.cfg"))) > 0
+          has_genimage =
+            length(Path.wildcard(Path.join(dir, "genimage*.cfg"))) > 0 or
+              length(Path.wildcard(Path.join(dir, "genimage*.cfg.in"))) > 0
+
           has_boot_cmd = File.exists?(Path.join(dir, "boot.cmd"))
           has_genimage or has_boot_cmd
         end)
@@ -334,40 +392,70 @@ defmodule NervesBootstrap.FileGenerator do
   end
 
   defp find_best_board_match(dirs, board) do
-    # Try to find the directory that best matches the board name
+    # Try to find the directory that best matches the board name.
     # Convert board name variations: arduino_uno_q -> arduino-uno-q, etc.
     board_patterns = [
-      # arduino_uno_q
       board,
-      # arduino-uno-q
       String.replace(board, "_", "-"),
-      # arduinounoq
       String.replace(board, "_", ""),
-      # remove _defconfig if present
       String.replace(board, "_defconfig", "")
     ]
 
-    # First, try exact matches in directory names
+    # Extract meaningful board parts (e.g., "qemu_x86_64" -> ["qemu", "x86_64"])
+    board_parts =
+      board
+      |> String.replace("_defconfig", "")
+      |> String.split("_")
+
+    # First, try exact basename match (dir name == pattern)
     exact_match =
       Enum.find(dirs, fn dir ->
         dir_name = Path.basename(dir)
-
-        Enum.any?(board_patterns, fn pattern ->
-          String.contains?(dir_name, pattern)
-        end)
+        Enum.any?(board_patterns, &(&1 == dir_name))
       end)
 
     if exact_match do
       exact_match
     else
-      partial_match =
+      # Try to find dirs where the last path component exactly matches
+      # a significant board part (e.g., "x86_64" matches board/qemu/x86_64/
+      # but NOT board/qemu/x86_64-efi/)
+      segment_match =
         Enum.find(dirs, fn dir ->
-          Enum.any?(board_patterns, fn pattern ->
-            String.contains?(dir, pattern)
+          dir_name = Path.basename(dir)
+
+          Enum.any?(board_parts, fn part ->
+            dir_name == part
           end)
         end)
 
-      partial_match || hd(dirs)
+      if segment_match do
+        segment_match
+      else
+        # Substring match in full path, ordered by specificity
+        # Prefer dirs whose basename contains a board pattern as a substring
+        partial_match =
+          Enum.find(dirs, fn dir ->
+            dir_name = Path.basename(dir)
+
+            Enum.any?(board_patterns, fn pattern ->
+              String.contains?(dir_name, pattern)
+            end)
+          end)
+
+        if partial_match do
+          partial_match
+        else
+          path_match =
+            Enum.find(dirs, fn dir ->
+              Enum.any?(board_patterns, fn pattern ->
+                String.contains?(dir, pattern)
+              end)
+            end)
+
+          path_match
+        end
+      end
     end
   end
 

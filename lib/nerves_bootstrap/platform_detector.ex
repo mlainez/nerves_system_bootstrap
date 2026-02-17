@@ -130,6 +130,7 @@ defmodule NervesBootstrap.PlatformDetector do
       String.contains?(defconfig, "BR2_x86_64=y") ->
         %{
           platform: :x86_64,
+          partition_scheme: :gpt,
           uboot_env_size: "0x20000",
           fwup_ops: :x86_64,
           boot_files: ["bzImage"],
