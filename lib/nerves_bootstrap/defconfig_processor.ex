@@ -592,8 +592,9 @@ defmodule NervesBootstrap.DefconfigProcessor do
     BR2_PACKAGE_BUSYBOX_CONFIG="${BR2_EXTERNAL_NERVES_PATH}/board/nerves-common/busybox.config"
 
     # Nerves meta-package (selects erlinit, erlang, fwup, boardid, openssl,
-    # ncurses, nerves_heart, uboot-tools, host-fwup, squashfs, rng-tools)
+    # ncurses, nerves_heart, uboot-tools, host-fwup, squashfs)
     BR2_PACKAGE_NERVES_CONFIG=y
+    BR2_PACKAGE_NERVES_CONFIG_ACCEPT_RNG_NOTICE=y
 
     # Additional Nerves packages (not covered by nerves-config)
     BR2_PACKAGE_CA_CERTIFICATES=y
