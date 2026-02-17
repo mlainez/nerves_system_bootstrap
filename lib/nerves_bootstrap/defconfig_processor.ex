@@ -740,39 +740,51 @@ defmodule NervesBootstrap.DefconfigProcessor do
     File.mkdir_p!(temp_dir)
 
     try do
-      # Download kernel tarball
-      kernel_url =
-        "https://cdn.kernel.org/pub/linux/kernel/v#{String.slice(kernel_version, 0, 1)}.x/linux-#{kernel_version}.tar.xz"
+      tarball_name = "linux-#{kernel_version}.tar.xz"
 
-      tarball_path = Path.join(temp_dir, "linux-#{kernel_version}.tar.xz")
+      # Store the tarball in Buildroot's download cache so it is not
+      # downloaded a second time during `make`.  Buildroot looks in
+      # <dl>/linux/<tarball>.
+      cache_dir = Path.join(NervesBootstrap.BuildrootManager.nerves_dl_dir(), "linux")
+      File.mkdir_p!(cache_dir)
+      cached_tarball = Path.join(cache_dir, tarball_name)
 
-      Mix.shell().info("📥 Downloading kernel #{kernel_version} from #{kernel_url}")
+      if File.exists?(cached_tarball) do
+        Mix.shell().info("📥 Kernel #{kernel_version} already cached in #{cache_dir}")
+      else
+        kernel_url =
+          "https://cdn.kernel.org/pub/linux/kernel/v#{String.slice(kernel_version, 0, 1)}.x/#{tarball_name}"
 
-      case download_file(kernel_url, tarball_path) do
-        :ok ->
-          Mix.shell().info("✅ Downloaded kernel tarball")
+        Mix.shell().info("📥 Downloading kernel #{kernel_version} from #{kernel_url}")
 
-          # Extract only the defconfig file we need
-          defconfig_path_in_tar = "linux-#{kernel_version}/arch/#{arch_name}/configs/defconfig"
-          extract_dir = Path.join(temp_dir, "extracted")
+        case download_file(kernel_url, cached_tarball) do
+          :ok ->
+            Mix.shell().info("✅ Downloaded kernel tarball to #{cache_dir}")
 
-          case extract_defconfig_from_tarball(tarball_path, defconfig_path_in_tar, extract_dir) do
-            {:ok, extracted_defconfig} ->
-              File.cp!(extracted_defconfig, target_path)
-              Mix.shell().info("✅ Extracted and copied kernel defconfig")
-              :ok
+          :error ->
+            Mix.shell().error("Failed to download kernel tarball")
+            throw(:download_failed)
+        end
+      end
 
-            :error ->
-              Mix.shell().error("Failed to extract defconfig from tarball")
-              :error
-          end
+      # Extract only the defconfig file we need
+      defconfig_path_in_tar = "linux-#{kernel_version}/arch/#{arch_name}/configs/defconfig"
+      extract_dir = Path.join(temp_dir, "extracted")
+
+      case extract_defconfig_from_tarball(cached_tarball, defconfig_path_in_tar, extract_dir) do
+        {:ok, extracted_defconfig} ->
+          File.cp!(extracted_defconfig, target_path)
+          Mix.shell().info("✅ Extracted and copied kernel defconfig")
+          :ok
 
         :error ->
-          Mix.shell().error("Failed to download kernel tarball")
+          Mix.shell().error("Failed to extract defconfig from tarball")
           :error
       end
+    catch
+      :download_failed -> :error
     after
-      # Clean up temporary directory
+      # Clean up temporary extraction directory (tarball stays in cache)
       if File.exists?(temp_dir) do
         File.rm_rf!(temp_dir)
       end

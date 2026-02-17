@@ -183,7 +183,11 @@ defmodule NervesBootstrap.BuildrootManager do
   end
 
   # Returns the Nerves download cache directory (~/.nerves/dl by default)
-  defp nerves_dl_dir do
+  @doc """
+  Returns the Nerves download cache directory.
+  Respects the `NERVES_BR_DL_DIR` environment variable; defaults to `~/.nerves/dl`.
+  """
+  def nerves_dl_dir do
     System.get_env("NERVES_BR_DL_DIR") || Path.join([System.user_home!(), ".nerves", "dl"])
   end
 

@@ -87,6 +87,7 @@ defmodule NervesBootstrap.FileGenerator do
       custom_packages: custom_packages,
       boot_part_blocks: boot_part_blocks,
       boot_part_mib: boot_part_mib,
+      nerves_system_br_req: nerves_system_br_version_req(),
       dep_string: fn {name, version} -> "{:#{name}, \"#{version}\", runtime: false}" end,
       architecture: get_architecture(toolchain_dep),
       # This could be configurable
@@ -595,6 +596,25 @@ defmodule NervesBootstrap.FileGenerator do
       |> Enum.sort()
     else
       []
+    end
+  end
+
+  # Derives a "~> major.minor" version requirement from the nerves_system_br
+  # VERSION file so the generated system pins the same Buildroot release that
+  # the bootstrap tool used to select the kernel version.
+  defp nerves_system_br_version_req do
+    br_path = NervesBootstrap.BuildrootManager.nerves_system_br_path()
+    version_file = Path.join(br_path, "VERSION")
+
+    if File.exists?(version_file) do
+      version = version_file |> File.read!() |> String.trim()
+
+      case String.split(version, ".") do
+        [major, minor | _] -> "~> #{major}.#{minor}"
+        _ -> "~> 1.33"
+      end
+    else
+      "~> 1.33"
     end
   end
 
