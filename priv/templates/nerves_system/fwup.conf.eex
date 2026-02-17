@@ -1,0 +1,431 @@
+# Firmware configuration file for <%= module_name %>
+
+<%= case Map.get(platform_config, :partition_scheme, :mbr) do %>
+<% partition_scheme when partition_scheme in [:gpt, :efi] -> %>
+require-fwup-version="1.4.0"  # For GPT support
+<% _ -> %>
+require-fwup-version="0.15.0"  # For the trim() call
+<% end %>
+
+include("${NERVES_SDK_IMAGES:-.}/fwup_include/fwup-common.conf")
+
+# File resources are listed in the order that they are included in the .fw file
+# This is important, since this is the order that they're written on a firmware
+# update due to the event driven nature of the update system.
+
+<%= case platform_config.platform do %>
+<% :sunxi_spl -> %>
+# Allwinner/Sunxi platform with U-Boot SPL
+file-resource u-boot-spl.bin {
+    host-path = "${NERVES_SYSTEM}/images/u-boot-sunxi-with-spl.bin"
+}
+<% :sunxi_standard -> %>
+# Allwinner/Sunxi platform with standard U-Boot
+file-resource u-boot.bin {
+    host-path = "${NERVES_SYSTEM}/images/u-boot.bin"
+}
+<% :rpi -> %>
+# Raspberry Pi platform resources
+file-resource config.txt {
+    host-path = "${NERVES_SYSTEM}/images/config.txt"
+}
+file-resource cmdline.txt {
+    host-path = "${NERVES_SYSTEM}/images/cmdline.txt"
+}
+file-resource start4.elf {
+    host-path = "${NERVES_SYSTEM}/images/start4.elf"
+}
+file-resource fixup4.dat {
+    host-path = "${NERVES_SYSTEM}/images/fixup4.dat"
+}
+<% :x86_64 -> %>
+# x86_64 platform resources
+file-resource bootx64.efi {
+    host-path = "${NERVES_SYSTEM}/images/efi-part/EFI/BOOT/BOOTX64.EFI"
+}
+<% _ -> %>
+# Generic U-Boot platform resources
+file-resource u-boot.bin {
+    host-path = "${NERVES_SYSTEM}/images/u-boot.bin"
+}
+<% end %>
+
+# Universal boot script resource (for U-Boot platforms)
+<%= if "boot.scr" in platform_config.boot_files do %>
+file-resource boot.scr {
+    host-path = "${NERVES_SYSTEM}/images/boot.scr"
+}
+<% end %>
+
+# Common kernel resource (name varies by platform)
+file-resource kernel.img {
+    host-path = "${NERVES_SYSTEM}/images/<%= platform_config.kernel_name %>"
+}
+
+# Device tree (for ARM platforms)
+<%= if platform_config.platform in [:sunxi_spl, :sunxi_standard, :generic_arm, :generic_arm64] do %>
+file-resource <%= platform_config.dtb_name %> {
+    host-path = "${NERVES_SYSTEM}/images/<%= platform_config.dtb_name %>"
+}
+<% end %>
+
+# Device tree overlays (DTSO)
+<%= for dtso_name <- dtso_names do %>
+file-resource <%= dtso_name %> {
+    host-path = "${NERVES_SYSTEM}/images/<%= dtso_name %>"
+}
+<% end %>
+
+file-resource rootfs.img {
+    host-path = ${ROOTFS}
+
+    # Error out if the rootfs size exceeds the partition size
+    assert-size-lte = ${ROOTFS_A_PART_COUNT}
+}
+
+##
+# This firmware task writes everything to the destination media
+##
+task complete {
+    # Only match if not mounted
+    require-unmounted-destination = true
+
+    on-init {
+<%= case Map.get(platform_config, :partition_scheme, :mbr) do %>
+<% scheme when scheme in [:gpt, :efi] -> %>        gpt_write(gpt-a)
+<% _ -> %>        mbr_write(mbr-a)
+<% end %>
+
+<%= case Map.get(platform_config, :partition_scheme, :mbr) do %>
+<% partition_scheme when partition_scheme in [:gpt, :efi] -> %>
+        # Initialize FAT32 boot partition for GPT/EFI
+        fat_mkfs(${BOOT_A_PART_OFFSET}, ${BOOT_A_PART_COUNT})
+        fat_setlabel(${BOOT_A_PART_OFFSET}, "BOOT-A")
+        fat_mkdir(${BOOT_A_PART_OFFSET}, "/boot")
+        fat_mkdir(${BOOT_A_PART_OFFSET}, "/boot/extlinux")
+<% _ -> %>
+        # Initialize FAT32 boot partition for MBR
+        fat_mkfs(${BOOT_A_PART_OFFSET}, ${BOOT_A_PART_COUNT})
+        fat_setlabel(${BOOT_A_PART_OFFSET}, "BOOT-A")
+<% end %>
+
+        uboot_clearenv(uboot-env)
+
+        include("${NERVES_PROVISIONING}")
+
+        uboot_setenv(uboot-env, "nerves_fw_active", "a")
+        uboot_setenv(uboot-env, "nerves_fw_devpath", ${NERVES_FW_DEVPATH})
+        uboot_setenv(uboot-env, "a.nerves_fw_application_part0_devpath", ${NERVES_FW_APPLICATION_PART0_DEVPATH})
+        uboot_setenv(uboot-env, "a.nerves_fw_application_part0_fstype", ${NERVES_FW_APPLICATION_PART0_FSTYPE})
+        uboot_setenv(uboot-env, "a.nerves_fw_application_part0_target", ${NERVES_FW_APPLICATION_PART0_TARGET})
+        uboot_setenv(uboot-env, "a.nerves_fw_product", ${NERVES_FW_PRODUCT})
+        uboot_setenv(uboot-env, "a.nerves_fw_description", ${NERVES_FW_DESCRIPTION})
+        uboot_setenv(uboot-env, "a.nerves_fw_version", ${NERVES_FW_VERSION})
+        uboot_setenv(uboot-env, "a.nerves_fw_platform", ${NERVES_FW_PLATFORM})
+        uboot_setenv(uboot-env, "a.nerves_fw_architecture", ${NERVES_FW_ARCHITECTURE})
+        uboot_setenv(uboot-env, "a.nerves_fw_author", ${NERVES_FW_AUTHOR})
+        uboot_setenv(uboot-env, "a.nerves_fw_vcs_identifier", ${NERVES_FW_VCS_IDENTIFIER})
+        uboot_setenv(uboot-env, "a.nerves_fw_misc", ${NERVES_FW_MISC})
+        uboot_setenv(uboot-env, "a.nerves_fw_uuid", "\${FWUP_META_UUID}")
+    }
+
+<%= case platform_config.platform do %>
+<% :sunxi_spl -> %>
+    # Allwinner/Sunxi boot sequence with U-Boot SPL
+    on-resource u-boot-spl.bin { raw_write(${UBOOT_SPL_OFFSET}) }
+    on-resource kernel.img { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+    on-resource <%= platform_config.dtb_name %> { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.dtb_name %>") }
+<%= for dtso_name <- dtso_names do %>
+    on-resource <%= dtso_name %> { fat_write(${BOOT_A_PART_OFFSET}, "<%= dtso_name %>") }
+<% end %>
+<% :sunxi_standard -> %>
+    # Allwinner/Sunxi boot sequence with standard U-Boot
+    on-resource u-boot.bin { fat_write(${BOOT_A_PART_OFFSET}, "u-boot.bin") }
+    on-resource kernel.img { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+    on-resource <%= platform_config.dtb_name %> { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.dtb_name %>") }
+<%= for dtso_name <- dtso_names do %>
+    on-resource <%= dtso_name %> { fat_write(${BOOT_A_PART_OFFSET}, "<%= dtso_name %>") }
+<% end %>
+<% :rpi -> %>
+    # Raspberry Pi boot sequence
+    on-resource config.txt { fat_write(${BOOT_A_PART_OFFSET}, "config.txt") }
+    on-resource cmdline.txt { fat_write(${BOOT_A_PART_OFFSET}, "cmdline.txt") }
+    on-resource start4.elf { fat_write(${BOOT_A_PART_OFFSET}, "start4.elf") }
+    on-resource fixup4.dat { fat_write(${BOOT_A_PART_OFFSET}, "fixup4.dat") }
+    on-resource kernel.img { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+<% :x86_64 -> %>
+    # x86_64 UEFI boot sequence
+    on-resource bootx64.efi { fat_write(${BOOT_A_PART_OFFSET}, "EFI/BOOT/BOOTX64.EFI") }
+    on-resource kernel.img { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+<% _ -> %>
+    # Generic U-Boot boot sequence
+    on-resource u-boot.bin { fat_write(${BOOT_A_PART_OFFSET}, "u-boot.bin") }
+    on-resource kernel.img { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+    <%= if platform_config.platform in [:generic_arm, :generic_arm64] do %>
+    on-resource <%= platform_config.dtb_name %> { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.dtb_name %>") }
+<%= for dtso_name <- dtso_names do %>
+    on-resource <%= dtso_name %> { fat_write(${BOOT_A_PART_OFFSET}, "<%= dtso_name %>") }
+<% end %>
+    <% end %>
+<% end %>
+
+    # Universal boot script (for U-Boot platforms) - complete task
+<%= if "boot.scr" in platform_config.boot_files do %>
+    on-resource boot.scr { fat_write(${BOOT_A_PART_OFFSET}, "boot.scr") }
+<% end %>
+
+    on-resource rootfs.img {
+        # write to the first rootfs partition
+        raw_write(${ROOTFS_A_PART_OFFSET})
+    }
+
+    on-finish {
+        # Clear out any old data in the B partition that might be mistaken for
+        # a file system. This is mostly to avoid confusion in humans when
+        # reprogramming SDCards with unknown contents.
+        raw_memset(${BOOT_B_PART_OFFSET}, 256, 0xff)
+        raw_memset(${ROOTFS_B_PART_OFFSET}, 256, 0xff)
+
+        # Invalidate the application data partition so that it is guaranteed to
+        # trigger the corrupt filesystem detection code on first boot and get
+        # formatted. If this isn't done and an old SDCard is reused, the
+        # application data could be in a weird state.
+        raw_memset(${APP_PART_OFFSET}, 256, 0xff)
+    }
+}
+
+task upgrade.a {
+    # This task upgrades the A partition
+    require-partition-offset(1, ${ROOTFS_B_PART_OFFSET})
+
+    # Verify the expected platform/architecture
+    require-uboot-variable(uboot-env, "b.nerves_fw_platform", "${NERVES_FW_PLATFORM}")
+    require-uboot-variable(uboot-env, "b.nerves_fw_architecture", "${NERVES_FW_ARCHITECTURE}")
+
+    on-init {
+        info("Upgrading partition A")
+
+        # Clear some firmware information just in case this update gets
+        # interrupted midway. If this partition was bootable, it's not going to
+        # be soon.
+        uboot_unsetenv(uboot-env, "a.nerves_fw_version")
+        uboot_unsetenv(uboot-env, "a.nerves_fw_platform")
+        uboot_unsetenv(uboot-env, "a.nerves_fw_architecture")
+        uboot_unsetenv(uboot-env, "a.nerves_fw_uuid")
+
+        # Reset the previous contents of the A boot partition
+        fat_mkfs(${BOOT_A_PART_OFFSET}, ${BOOT_A_PART_COUNT})
+        fat_setlabel(${BOOT_A_PART_OFFSET}, "BOOT-A")
+
+        # Indicate that the entire partition can be cleared
+        trim(${ROOTFS_A_PART_OFFSET}, ${ROOTFS_A_PART_COUNT})
+    }
+
+    # Write the new boot partition files and rootfs. The MBR still points
+    # to the B partition, so an error or power failure during this part
+    # won't hurt anything.
+<%= case platform_config.platform do %>
+<% :sunxi_spl -> %>
+    on-resource u-boot-spl.bin { raw_write(${UBOOT_SPL_OFFSET}) }
+    on-resource kernel.img { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+    on-resource <%= platform_config.dtb_name %> { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.dtb_name %>") }
+<%= for dtso_name <- dtso_names do %>
+    on-resource <%= dtso_name %> { fat_write(${BOOT_A_PART_OFFSET}, "<%= dtso_name %>") }
+<% end %>
+<% :sunxi_standard -> %>
+    on-resource u-boot.bin { fat_write(${BOOT_A_PART_OFFSET}, "u-boot.bin") }
+    on-resource kernel.img { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+    on-resource <%= platform_config.dtb_name %> { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.dtb_name %>") }
+<%= for dtso_name <- dtso_names do %>
+    on-resource <%= dtso_name %> { fat_write(${BOOT_A_PART_OFFSET}, "<%= dtso_name %>") }
+<% end %>
+<% :rpi -> %>
+    on-resource config.txt { fat_write(${BOOT_A_PART_OFFSET}, "config.txt") }
+    on-resource cmdline.txt { fat_write(${BOOT_A_PART_OFFSET}, "cmdline.txt") }
+    on-resource start4.elf { fat_write(${BOOT_A_PART_OFFSET}, "start4.elf") }
+    on-resource fixup4.dat { fat_write(${BOOT_A_PART_OFFSET}, "fixup4.dat") }
+    on-resource kernel.img { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+<% :x86_64 -> %>
+    on-resource bootx64.efi { fat_write(${BOOT_A_PART_OFFSET}, "EFI/BOOT/BOOTX64.EFI") }
+    on-resource kernel.img { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+<% _ -> %>
+    on-resource u-boot.bin { fat_write(${BOOT_A_PART_OFFSET}, "u-boot.bin") }
+    on-resource kernel.img { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+    <%= if platform_config.platform in [:generic_arm, :generic_arm64] do %>
+    on-resource <%= platform_config.dtb_name %> { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.dtb_name %>") }
+<%= for dtso_name <- dtso_names do %>
+    on-resource <%= dtso_name %> { fat_write(${BOOT_A_PART_OFFSET}, "<%= dtso_name %>") }
+<% end %>
+    <% end %>
+<% end %>
+
+    # Universal boot script (for U-Boot platforms) - upgrade.a task
+<%= if "boot.scr" in platform_config.boot_files do %>
+    on-resource boot.scr { fat_write(${BOOT_A_PART_OFFSET}, "boot.scr") }
+<% end %>
+
+    on-resource rootfs.img {
+        delta-source-raw-offset=${ROOTFS_B_PART_OFFSET}
+        delta-source-raw-count=${ROOTFS_B_PART_COUNT}
+        raw_write(${ROOTFS_A_PART_OFFSET})
+    }
+
+    on-finish {
+        # Update firmware metadata
+        uboot_setenv(uboot-env, "a.nerves_fw_application_part0_devpath", ${NERVES_FW_APPLICATION_PART0_DEVPATH})
+        uboot_setenv(uboot-env, "a.nerves_fw_application_part0_fstype", ${NERVES_FW_APPLICATION_PART0_FSTYPE})
+        uboot_setenv(uboot-env, "a.nerves_fw_application_part0_target", ${NERVES_FW_APPLICATION_PART0_TARGET})
+        uboot_setenv(uboot-env, "a.nerves_fw_product", ${NERVES_FW_PRODUCT})
+        uboot_setenv(uboot-env, "a.nerves_fw_description", ${NERVES_FW_DESCRIPTION})
+        uboot_setenv(uboot-env, "a.nerves_fw_version", ${NERVES_FW_VERSION})
+        uboot_setenv(uboot-env, "a.nerves_fw_platform", ${NERVES_FW_PLATFORM})
+        uboot_setenv(uboot-env, "a.nerves_fw_architecture", ${NERVES_FW_ARCHITECTURE})
+        uboot_setenv(uboot-env, "a.nerves_fw_author", ${NERVES_FW_AUTHOR})
+        uboot_setenv(uboot-env, "a.nerves_fw_vcs_identifier", ${NERVES_FW_VCS_IDENTIFIER})
+        uboot_setenv(uboot-env, "a.nerves_fw_misc", ${NERVES_FW_MISC})
+        uboot_setenv(uboot-env, "a.nerves_fw_uuid", "\${FWUP_META_UUID}")
+
+	# Switch over to boot the new firmware
+        uboot_setenv(uboot-env, "nerves_fw_active", "a")
+<%= case Map.get(platform_config, :partition_scheme, :mbr) do %>
+<% partition_scheme when partition_scheme in [:gpt, :efi] -> %>
+        gpt_write(gpt-a)
+<% _ -> %>
+        mbr_write(mbr-a)
+<% end %>
+    }
+
+    on-error {
+    }
+}
+
+task upgrade.b {
+    # This task upgrades the B partition
+    require-partition-offset(1, ${ROOTFS_A_PART_OFFSET})
+
+    # Verify the expected platform/architecture
+    require-uboot-variable(uboot-env, "a.nerves_fw_platform", "${NERVES_FW_PLATFORM}")
+    require-uboot-variable(uboot-env, "a.nerves_fw_architecture", "${NERVES_FW_ARCHITECTURE}")
+
+    on-init {
+        info("Upgrading partition B")
+
+        # Clear some firmware information just in case this update gets
+        # interrupted midway.
+        uboot_unsetenv(uboot-env, "b.nerves_fw_version")
+        uboot_unsetenv(uboot-env, "b.nerves_fw_platform")
+        uboot_unsetenv(uboot-env, "b.nerves_fw_architecture")
+        uboot_unsetenv(uboot-env, "b.nerves_fw_uuid")
+
+        # Reset the previous contents of the B boot partition
+        fat_mkfs(${BOOT_B_PART_OFFSET}, ${BOOT_B_PART_COUNT})
+        fat_setlabel(${BOOT_B_PART_OFFSET}, "BOOT-B")
+
+        trim(${ROOTFS_B_PART_OFFSET}, ${ROOTFS_B_PART_COUNT})
+    }
+
+    # Write the new boot partition files and rootfs. The MBR still points
+    # to the A partition, so an error or power failure during this part
+    # won't hurt anything.
+<%= case platform_config.platform do %>
+<% :sunxi_spl -> %>
+    on-resource u-boot-spl.bin { raw_write(${UBOOT_SPL_OFFSET}) }
+    on-resource kernel.img { fat_write(${BOOT_B_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+    on-resource <%= platform_config.dtb_name %> { fat_write(${BOOT_B_PART_OFFSET}, "<%= platform_config.dtb_name %>") }
+<%= for dtso_name <- dtso_names do %>
+    on-resource <%= dtso_name %> { fat_write(${BOOT_B_PART_OFFSET}, "<%= dtso_name %>") }
+<% end %>
+<% :sunxi_standard -> %>
+    on-resource u-boot.bin { fat_write(${BOOT_B_PART_OFFSET}, "u-boot.bin") }
+    on-resource kernel.img { fat_write(${BOOT_B_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+    on-resource <%= platform_config.dtb_name %> { fat_write(${BOOT_B_PART_OFFSET}, "<%= platform_config.dtb_name %>") }
+<%= for dtso_name <- dtso_names do %>
+    on-resource <%= dtso_name %> { fat_write(${BOOT_B_PART_OFFSET}, "<%= dtso_name %>") }
+<% end %>
+<% :rpi -> %>
+    on-resource config.txt { fat_write(${BOOT_B_PART_OFFSET}, "config.txt") }
+    on-resource cmdline.txt { fat_write(${BOOT_B_PART_OFFSET}, "cmdline.txt") }
+    on-resource start4.elf { fat_write(${BOOT_B_PART_OFFSET}, "start4.elf") }
+    on-resource fixup4.dat { fat_write(${BOOT_B_PART_OFFSET}, "fixup4.dat") }
+    on-resource kernel.img { fat_write(${BOOT_B_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+<% :x86_64 -> %>
+    on-resource bootx64.efi { fat_write(${BOOT_B_PART_OFFSET}, "EFI/BOOT/BOOTX64.EFI") }
+    on-resource kernel.img { fat_write(${BOOT_B_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+<% _ -> %>
+    on-resource u-boot.bin { fat_write(${BOOT_B_PART_OFFSET}, "u-boot.bin") }
+    on-resource kernel.img { fat_write(${BOOT_B_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+    <%= if platform_config.platform in [:generic_arm, :generic_arm64] do %>
+    on-resource <%= platform_config.dtb_name %> { fat_write(${BOOT_B_PART_OFFSET}, "<%= platform_config.dtb_name %>") }
+<%= for dtso_name <- dtso_names do %>
+    on-resource <%= dtso_name %> { fat_write(${BOOT_B_PART_OFFSET}, "<%= dtso_name %>") }
+<% end %>
+    <% end %>
+<% end %>
+
+    # Universal boot script (for U-Boot platforms) - upgrade.b task
+<%= if "boot.scr" in platform_config.boot_files do %>
+    on-resource boot.scr { fat_write(${BOOT_B_PART_OFFSET}, "boot.scr") }
+<% end %>
+
+    on-resource rootfs.img {
+        delta-source-raw-offset=${ROOTFS_A_PART_OFFSET}
+        delta-source-raw-count=${ROOTFS_A_PART_COUNT}
+        raw_write(${ROOTFS_B_PART_OFFSET})
+    }
+
+    on-finish {
+        # Update firmware metadata
+        uboot_setenv(uboot-env, "b.nerves_fw_application_part0_devpath", ${NERVES_FW_APPLICATION_PART0_DEVPATH})
+        uboot_setenv(uboot-env, "b.nerves_fw_application_part0_fstype", ${NERVES_FW_APPLICATION_PART0_FSTYPE})
+        uboot_setenv(uboot-env, "b.nerves_fw_application_part0_target", ${NERVES_FW_APPLICATION_PART0_TARGET})
+        uboot_setenv(uboot-env, "b.nerves_fw_product", ${NERVES_FW_PRODUCT})
+        uboot_setenv(uboot-env, "b.nerves_fw_description", ${NERVES_FW_DESCRIPTION})
+        uboot_setenv(uboot-env, "b.nerves_fw_version", ${NERVES_FW_VERSION})
+        uboot_setenv(uboot-env, "b.nerves_fw_platform", ${NERVES_FW_PLATFORM})
+        uboot_setenv(uboot-env, "b.nerves_fw_architecture", ${NERVES_FW_ARCHITECTURE})
+        uboot_setenv(uboot-env, "b.nerves_fw_author", ${NERVES_FW_AUTHOR})
+        uboot_setenv(uboot-env, "b.nerves_fw_vcs_identifier", ${NERVES_FW_VCS_IDENTIFIER})
+        uboot_setenv(uboot-env, "b.nerves_fw_misc", ${NERVES_FW_MISC})
+        uboot_setenv(uboot-env, "b.nerves_fw_uuid", "\${FWUP_META_UUID}")
+
+	# Switch over to boot the new firmware
+        uboot_setenv(uboot-env, "nerves_fw_active", "b")
+<%= case Map.get(platform_config, :partition_scheme, :mbr) do %>
+<% partition_scheme when partition_scheme in [:gpt, :efi] -> %>
+        gpt_write(gpt-b)
+<% _ -> %>
+        mbr_write(mbr-b)
+<% end %>
+    }
+
+    on-error {
+    }
+}
+
+task upgrade.unexpected {
+    require-uboot-variable(uboot-env, "a.nerves_fw_platform", "${NERVES_FW_PLATFORM}")
+    require-uboot-variable(uboot-env, "a.nerves_fw_architecture", "${NERVES_FW_ARCHITECTURE}")
+    on-init {
+        error("Please check the media being upgraded. It doesn't look like either the A or B partitions are active.")
+    }
+}
+
+task upgrade.wrongplatform {
+    on-init {
+        error("Expecting platform=${NERVES_FW_PLATFORM} and architecture=${NERVES_FW_ARCHITECTURE}")
+    }
+}
+
+task provision {
+    require-uboot-variable(uboot-env, "a.nerves_fw_platform", "${NERVES_FW_PLATFORM}")
+    require-uboot-variable(uboot-env, "a.nerves_fw_architecture", "${NERVES_FW_ARCHITECTURE}")
+    on-init {
+        include("${NERVES_PROVISIONING}")
+    }
+}
+
+task provision.wrongplatform {
+    on-init {
+        error("Expecting platform=${NERVES_FW_PLATFORM} and architecture=${NERVES_FW_ARCHITECTURE}")
+    }
+}

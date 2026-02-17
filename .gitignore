@@ -1,4 +1,4 @@
-nerves_system*
+/nerves_system_*/
 
 _build/
 deps

@@ -1,0 +1,21 @@
+#!/bin/sh
+
+set -e
+
+# Post-createfs script for <%= module_name %>
+# This script is called from buildroot after the filesystem image has been created
+# You can use this to create additional images or modify the output
+
+FWUP_CONFIG=$NERVES_DEFCONFIG_DIR/fwup.conf
+
+# Run the common post-image processing for nerves
+$BR2_EXTERNAL_NERVES_PATH/board/nerves-common/post-createfs.sh $TARGET_DIR $FWUP_CONFIG
+
+# Add your custom post-createfs steps here
+# Examples:
+# - Create additional firmware images
+# - Sign firmware images
+# - Generate checksums
+# - Upload to staging server
+
+echo "Post-createfs script completed for <%= app %>"

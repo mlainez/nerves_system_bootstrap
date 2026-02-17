@@ -1,0 +1,20 @@
+# fw_printenv and fw_setenv configuration
+#
+# This is only used for storing firmware metadata on this platform. I.e. you
+# don't need to use the U-Boot bootloader if you're not already using it.
+#
+# See fwup.conf for offset and size
+
+# Device name	Device offset	Env. size	Flash sector size	Number of sectors
+<%= case platform_config.platform do %>
+<% p when p in [:sunxi_spl] -> %>
+# Allwinner/Sunxi with U-Boot SPL - environment calculated dynamically
+# UBOOT_ENV_OFFSET = <%= platform_config.uboot_spl_offset %> + <%= platform_config.uboot_spl_count %> = <%= String.to_integer(platform_config.uboot_spl_offset) + String.to_integer(platform_config.uboot_spl_count) %> blocks
+# Converted to bytes: <%= (String.to_integer(platform_config.uboot_spl_offset) + String.to_integer(platform_config.uboot_spl_count)) * 512 |> Integer.to_string(16) |> String.downcase %>
+# UBOOT_ENV_COUNT = <%= platform_config.uboot_env_count %> blocks = <%= String.to_integer(platform_config.uboot_env_count) * 512 %> bytes = 0x<%= String.to_integer(platform_config.uboot_env_count) * 512 |> Integer.to_string(16) |> String.downcase %>
+<%= platform_config.dev_path %>	0x<%= (String.to_integer(platform_config.uboot_spl_offset) + String.to_integer(platform_config.uboot_spl_count)) * 512 |> Integer.to_string(16) |> String.downcase %>	0x<%= String.to_integer(platform_config.uboot_env_count) * 512 |> Integer.to_string(16) |> String.downcase %>		0x200			<%= platform_config.uboot_env_count %>
+<% _ -> %>
+# Standard platforms - environment at calculated offset
+# UBOOT_ENV_OFFSET = <%= Map.get(platform_config, :uboot_env_offset, 16) %> blocks = 0x<%= Map.get(platform_config, :uboot_env_offset, 16) * 512 |> Integer.to_string(16) |> String.downcase %>
+<%= platform_config.dev_path %>	0x<%= Map.get(platform_config, :uboot_env_offset, 16) * 512 |> Integer.to_string(16) |> String.downcase %>		0x2000		0x200			16
+<% end %>

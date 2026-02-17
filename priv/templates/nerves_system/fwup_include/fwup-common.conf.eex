@@ -1,0 +1,355 @@
+#
+# Common fwup configuration for Nerves systems
+#
+
+# All of these can be overridden using environment variables of the same name.
+#
+#  Run 'fwup -m' to query values in a .fw file.
+#  Use 'fw_printenv' to query values on the target.
+#
+# These are used by Nerves libraries to introspect.
+define(NERVES_FW_PRODUCT, "${NERVES_FW_PRODUCT}")
+define(NERVES_FW_DESCRIPTION, "${NERVES_FW_DESCRIPTION}")
+define(NERVES_FW_VERSION, "${NERVES_SDK_VERSION}")
+define(NERVES_FW_PLATFORM, "${NERVES_FW_PLATFORM}")
+define(NERVES_FW_ARCHITECTURE, "${NERVES_FW_ARCHITECTURE}")
+define(NERVES_FW_AUTHOR, "The Nerves Team")
+
+define(NERVES_FW_DEVPATH, "<%= platform_config.dev_path %>")
+define(NERVES_FW_APPLICATION_PART0_DEVPATH, "<%= platform_config.app_dev_path %>") # Linux part number is 1-based
+define(NERVES_FW_APPLICATION_PART0_FSTYPE, "f2fs")
+define(NERVES_FW_APPLICATION_PART0_TARGET, "/root")
+define(NERVES_PROVISIONING, "${NERVES_SYSTEM}/images/fwup_include/provisioning.conf")
+
+# Default paths if not specified via the commandline
+define(ROOTFS, "${NERVES_SYSTEM}/images/rootfs.squashfs")
+
+# This configuration file will create an image with the following layout:
+<%= case Map.get(platform_config, :partition_scheme, :mbr) do %>
+<% :efi -> %>
+# EFI/GPT partition scheme - UEFI compatible system:
+#
+# +----------------------------+
+# | GPT Partition Table        |
+# +----------------------------+
+# | EFI System Partition       |
+# | (FAT32, bootloader)        |
+# +----------------------------+
+# | Firmware configuration data|
+# | (formatted as uboot env)   |
+# +----------------------------+
+# | p0*: Boot A (FAT32)        |
+# | kernel, device tree,       |
+# | config files, etc.         |
+# +----------------------------+
+# | p0*: Boot B (FAT32)        |
+# +----------------------------+
+# | p1*: Rootfs A (squashfs)   |
+# +----------------------------+
+# | p1*: Rootfs B (squashfs)   |
+# +----------------------------+
+# | p2: Application (f2fs)     |
+# +----------------------------+
+<% :gpt -> %>
+# GPT partition scheme - Modern GUID Partition Table:
+#
+# +----------------------------+
+# | GPT Partition Table        |
+# +----------------------------+
+# | Firmware configuration data|
+# | (formatted as uboot env)   |
+# +----------------------------+
+# | p0*: Boot A (FAT32)        |
+# | kernel, device tree,       |
+# | config files, etc.         |
+# +----------------------------+
+# | p0*: Boot B (FAT32)        |
+# +----------------------------+
+# | p1*: Rootfs A (squashfs)   |
+# +----------------------------+
+# | p1*: Rootfs B (squashfs)   |
+# +----------------------------+
+# | p2: Application (f2fs)     |
+# +----------------------------+
+<% :mbr -> %>
+# MBR partition scheme - Traditional Master Boot Record:
+#
+# +----------------------------+
+# | MBR                        |
+# +----------------------------+
+# | Firmware configuration data|
+# | (formatted as uboot env)   |
+# +----------------------------+
+# | p0*: Boot A (FAT32)        |
+# | kernel, device tree,       |
+# | config files, etc.         |
+# +----------------------------+
+# | p0*: Boot B (FAT32)        |
+# +----------------------------+
+# | p1*: Rootfs A (squashfs)   |
+# +----------------------------+
+# | p1*: Rootfs B (squashfs)   |
+# +----------------------------+
+# | p2: Application (f2fs)     |
+# +----------------------------+
+<% end %>
+#
+# The p0/p1 partition points to whichever of configurations A or B that is
+# active.
+#
+# The image is sized to be less than 1 GB so that it fits on nearly any
+# SDCard around. If you have a larger SDCard and need more space, feel free to
+# bump the partition sizes below.
+
+# Sizes are in 512 byte blocks
+# Dynamic partition layout based on platform requirements
+
+<%= if platform_config.needs_uboot_spl do %>
+# Allwinner/Sunxi SPL+U-Boot combined image configuration
+define(UBOOT_SPL_OFFSET, <%= platform_config.uboot_spl_offset %>)
+define(UBOOT_SPL_COUNT, <%= platform_config.uboot_spl_count %>)
+define-eval(UBOOT_ENV_OFFSET, "${UBOOT_SPL_OFFSET} + ${UBOOT_SPL_COUNT}")
+define(UBOOT_ENV_COUNT, <%= platform_config.uboot_env_count %>)
+define-eval(BOOT_A_PART_OFFSET, "${UBOOT_ENV_OFFSET} + ${UBOOT_ENV_COUNT}")
+<% else %>
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
+# Standard platform with boot partition (Raspberry Pi, x86, generic ARM)
+define(UBOOT_ENV_OFFSET, 16)
+define(UBOOT_ENV_COUNT, 16)      # 8 KB
+define(BOOT_A_PART_OFFSET, 63)
+<% else %>
+# RISC-V platform without boot partition (MangoPi style)
+define(UBOOT_OFFSET, <%= Map.get(platform_config, :uboot_offset, 16) %>)
+define(UBOOT_COUNT, 8176)        # ~4MB for U-Boot
+define(UBOOT_ENV_OFFSET, <%= Map.get(platform_config, :uboot_env_offset, 8192) %>)
+define(UBOOT_ENV_COUNT, 256)     # 128KB for env
+<% end %>
+<% end %>
+
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
+# Boot partitions (for platforms that need them)
+define(BOOT_A_PART_COUNT, <%= Map.get(platform_config, :boot_part_count, 38630) %>)
+define-eval(BOOT_B_PART_OFFSET, "${BOOT_A_PART_OFFSET} + ${BOOT_A_PART_COUNT}")
+define(BOOT_B_PART_COUNT, ${BOOT_A_PART_COUNT})
+
+# Rootfs follows boot partitions
+define-eval(ROOTFS_A_PART_OFFSET, "${BOOT_B_PART_OFFSET} + ${BOOT_B_PART_COUNT}")
+<% else %>
+# No boot partitions, rootfs starts after U-Boot environment
+define-eval(ROOTFS_A_PART_OFFSET, "${UBOOT_ENV_OFFSET} + ${UBOOT_ENV_COUNT}")
+<% end %>
+
+# Let the rootfs have room to grow up to 128 MiB
+define(ROOTFS_A_PART_COUNT, 289044)
+define-eval(ROOTFS_B_PART_OFFSET, "${ROOTFS_A_PART_OFFSET} + ${ROOTFS_A_PART_COUNT}")
+define(ROOTFS_B_PART_COUNT, ${ROOTFS_A_PART_COUNT})
+
+# Application partition. This partition can occupy all of the remaining space.
+# Size it to fit the destination.
+define-eval(APP_PART_OFFSET, "${ROOTFS_B_PART_OFFSET} + ${ROOTFS_B_PART_COUNT}")
+define(APP_PART_COUNT, 1048576)
+
+# Firmware archive metadata
+meta-product = ${NERVES_FW_PRODUCT}
+meta-description = ${NERVES_FW_DESCRIPTION}
+meta-version = ${NERVES_FW_VERSION}
+meta-platform = ${NERVES_FW_PLATFORM}
+meta-architecture = ${NERVES_FW_ARCHITECTURE}
+meta-author = ${NERVES_FW_AUTHOR}
+meta-vcs-identifier = ${NERVES_FW_VCS_IDENTIFIER}
+meta-misc = ${NERVES_FW_MISC}
+
+# Partition tables - Support both MBR and GPT/EFI based on platform configuration
+<%= case Map.get(platform_config, :partition_scheme, :mbr) do %>
+<% :gpt -> %>
+# GPT partition layout (without EFI)
+gpt gpt-a {
+    guid = "<%= Map.get(partition_guids, :disk_guid, "b443fbeb-2c93-481b-88b3-0ecb600cc4de") %>"
+
+    partition 0 {
+        name = "boot-a"
+        block-offset = ${BOOT_A_PART_OFFSET}
+        block-count = ${BOOT_A_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        guid = "<%= Map.get(partition_guids, :boot_a_guid) %>"
+    }
+    partition 1 {
+        name = "rootfs-a"
+        block-offset = ${ROOTFS_A_PART_OFFSET}
+        block-count = ${ROOTFS_A_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        guid = "<%= Map.get(partition_guids, :rootfs_a_guid) %>"
+    }
+    partition 2 {
+        name = "rootfs-b"
+        block-offset = ${ROOTFS_B_PART_OFFSET}
+        block-count = ${ROOTFS_B_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        guid = "<%= Map.get(partition_guids, :rootfs_b_guid) %>"
+    }
+    partition 3 {
+        name = "application"
+        block-offset = ${APP_PART_OFFSET}
+        block-count = ${APP_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        expand = true
+        guid = "<%= Map.get(partition_guids, :app_guid) %>"
+    }
+}
+
+gpt gpt-b {
+    guid = "<%= Map.get(partition_guids, :disk_guid, "b443fbeb-2c93-481b-88b3-0ecb600cc4de") %>"
+
+    partition 0 {
+        name = "boot-b"
+        block-offset = ${BOOT_B_PART_OFFSET}
+        block-count = ${BOOT_B_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        guid = "<%= Map.get(partition_guids, :boot_b_guid) %>"
+    }
+    partition 1 {
+        name = "rootfs-a"
+        block-offset = ${ROOTFS_A_PART_OFFSET}
+        block-count = ${ROOTFS_A_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        guid = "<%= Map.get(partition_guids, :rootfs_a_guid) %>"
+    }
+    partition 2 {
+        name = "rootfs-b"
+        block-offset = ${ROOTFS_B_PART_OFFSET}
+        block-count = ${ROOTFS_B_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        guid = "<%= Map.get(partition_guids, :rootfs_b_guid) %>"
+    }
+    partition 3 {
+        name = "application"
+        block-offset = ${APP_PART_OFFSET}
+        block-count = ${APP_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        expand = true
+        guid = "<%= Map.get(partition_guids, :app_guid) %>"
+    }
+}
+
+<% :efi -> %>
+# EFI/GPT partition layout
+gpt gpt-a {
+    guid = "<%= Map.get(partition_guids, :disk_guid, "b443fbeb-2c93-481b-88b3-0ecb600cc4de") %>"
+
+    partition 0 {
+        name = "EFI"
+        block-offset = ${BOOT_A_PART_OFFSET}
+        block-count = ${BOOT_A_PART_COUNT}
+        type = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" # EFI System Partition
+        guid = "<%= Map.get(partition_guids, :boot_a_guid) %>"
+    }
+    partition 1 {
+        name = "rootfs-a"
+        block-offset = ${ROOTFS_A_PART_OFFSET}
+        block-count = ${ROOTFS_A_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        guid = "<%= Map.get(partition_guids, :rootfs_a_guid) %>"
+    }
+    partition 2 {
+        name = "rootfs-b"
+        block-offset = ${ROOTFS_B_PART_OFFSET}
+        block-count = ${ROOTFS_B_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        guid = "<%= Map.get(partition_guids, :rootfs_b_guid) %>"
+    }
+    partition 3 {
+        name = "application"
+        block-offset = ${APP_PART_OFFSET}
+        block-count = ${APP_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        expand = true
+        guid = "<%= Map.get(partition_guids, :app_guid) %>"
+    }
+}
+
+gpt gpt-b {
+    guid = "<%= Map.get(partition_guids, :disk_guid, "b443fbeb-2c93-481b-88b3-0ecb600cc4de") %>"
+
+    partition 0 {
+        name = "EFI"
+        block-offset = ${BOOT_B_PART_OFFSET}
+        block-count = ${BOOT_B_PART_COUNT}
+        type = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" # EFI System Partition
+        guid = "<%= Map.get(partition_guids, :boot_b_guid) %>"
+    }
+    partition 1 {
+        name = "rootfs-a"
+        block-offset = ${ROOTFS_A_PART_OFFSET}
+        block-count = ${ROOTFS_A_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        guid = "<%= Map.get(partition_guids, :rootfs_a_guid) %>"
+    }
+    partition 2 {
+        name = "rootfs-b"
+        block-offset = ${ROOTFS_B_PART_OFFSET}
+        block-count = ${ROOTFS_B_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        guid = "<%= Map.get(partition_guids, :rootfs_b_guid) %>"
+    }
+    partition 3 {
+        name = "application"
+        block-offset = ${APP_PART_OFFSET}
+        block-count = ${APP_PART_COUNT}
+        type = "0fc63daf-8483-4772-8e79-3d69d8477de4" # Linux filesystem
+        expand = true
+        guid = "<%= Map.get(partition_guids, :app_guid) %>"
+    }
+}
+
+<% :mbr -> %>
+# MBR partition layout (default)
+mbr mbr-a {
+    partition 0 {
+        block-offset = ${BOOT_A_PART_OFFSET}
+        block-count = ${BOOT_A_PART_COUNT}
+        type = 0xc # FAT32
+        boot = true
+    }
+    partition 1 {
+        block-offset = ${ROOTFS_A_PART_OFFSET}
+        block-count = ${ROOTFS_A_PART_COUNT}
+        type = 0x83 # Linux
+    }
+    partition 2 {
+        block-offset = ${APP_PART_OFFSET}
+        block-count = ${APP_PART_COUNT}
+        type = 0x83 # Linux
+        expand = true
+    }
+    # partition 3 is unused
+}
+
+mbr mbr-b {
+    partition 0 {
+        block-offset = ${BOOT_B_PART_OFFSET}
+        block-count = ${BOOT_B_PART_COUNT}
+        type = 0xc # FAT32
+        boot = true
+    }
+    partition 1 {
+        block-offset = ${ROOTFS_B_PART_OFFSET}
+        block-count = ${ROOTFS_B_PART_COUNT}
+        type = 0x83 # Linux
+    }
+    partition 2 {
+        block-offset = ${APP_PART_OFFSET}
+        block-count = ${APP_PART_COUNT}
+        type = 0x83 # Linux
+        expand = true
+    }
+    # partition 3 is unused
+}
+<% end %>
+
+# Location where installed firmware information is stored.
+# While this is called "u-boot", u-boot isn't involved in this
+# setup. It just provides a convenient key/value store format.
+uboot-environment uboot-env {
+    block-offset = ${UBOOT_ENV_OFFSET}
+    block-count = ${UBOOT_ENV_COUNT}
+}

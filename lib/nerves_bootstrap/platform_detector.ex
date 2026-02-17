@@ -77,7 +77,10 @@ defmodule NervesBootstrap.PlatformDetector do
           needs_uboot_spl: false,
           needs_boot_partition: true,
           uboot_offset: 16,
-          uboot_env_offset: 8192
+          uboot_env_offset: 8192,
+          dev_path: "/dev/mmcblk0",
+          boot_dev_path: "/dev/mmcblk0p1",
+          app_dev_path: "/dev/mmcblk0p3"
         }
 
       # Allwinner/Sunxi detection
@@ -107,7 +110,10 @@ defmodule NervesBootstrap.PlatformDetector do
           uboot_env_count: "128",
           needs_boot_partition: true,
           uboot_offset: 16,
-          uboot_env_offset: 8192
+          uboot_env_offset: 8192,
+          dev_path: "/dev/mmcblk0",
+          boot_dev_path: "/dev/mmcblk0p1",
+          app_dev_path: "/dev/mmcblk0p3"
         }
 
       # x86_64 detection
@@ -125,7 +131,10 @@ defmodule NervesBootstrap.PlatformDetector do
           needs_uboot_spl: false,
           needs_boot_partition: true,
           uboot_offset: 16,
-          uboot_env_offset: 8192
+          uboot_env_offset: 8192,
+          dev_path: "/dev/sda",
+          boot_dev_path: "/dev/sda1",
+          app_dev_path: "/dev/sda3"
         }
 
       # RISC-V detection
@@ -143,7 +152,10 @@ defmodule NervesBootstrap.PlatformDetector do
           needs_uboot_spl: false,
           needs_boot_partition: false,
           uboot_offset: 16,
-          uboot_env_offset: 8192
+          uboot_env_offset: 8192,
+          dev_path: "/dev/mmcblk0",
+          boot_dev_path: "/dev/mmcblk0p1",
+          app_dev_path: "/dev/mmcblk0p3"
         }
 
       # Generic ARM detection
@@ -161,7 +173,10 @@ defmodule NervesBootstrap.PlatformDetector do
           needs_uboot_spl: false,
           needs_boot_partition: true,
           uboot_offset: 16,
-          uboot_env_offset: 8192
+          uboot_env_offset: 8192,
+          dev_path: "/dev/mmcblk0",
+          boot_dev_path: "/dev/mmcblk0p1",
+          app_dev_path: "/dev/mmcblk0p3"
         }
 
       # Generic ARM64 detection
@@ -179,7 +194,10 @@ defmodule NervesBootstrap.PlatformDetector do
           needs_uboot_spl: false,
           needs_boot_partition: true,
           uboot_offset: 16,
-          uboot_env_offset: 8192
+          uboot_env_offset: 8192,
+          dev_path: "/dev/mmcblk0",
+          boot_dev_path: "/dev/mmcblk0p1",
+          app_dev_path: "/dev/mmcblk0p3"
         }
 
       # Default fallback
@@ -197,7 +215,10 @@ defmodule NervesBootstrap.PlatformDetector do
           needs_uboot_spl: false,
           needs_boot_partition: true,
           uboot_offset: 16,
-          uboot_env_offset: 8192
+          uboot_env_offset: 8192,
+          dev_path: "/dev/mmcblk0",
+          boot_dev_path: "/dev/mmcblk0p1",
+          app_dev_path: "/dev/mmcblk0p3"
         }
     end
   end
