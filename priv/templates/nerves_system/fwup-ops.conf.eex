@@ -41,8 +41,12 @@ task factory-reset {
 ##
 task prevent-revert.a {
     # Check that we're running on B
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
     require-partition-offset(0, ${BOOT_B_PART_OFFSET})
     require-partition-offset(1, ${ROOTFS_B_PART_OFFSET})
+<% else %>
+    require-partition-offset(0, ${ROOTFS_B_PART_OFFSET})
+<% end %>
     require-uboot-variable(uboot-env, "nerves_fw_active", "b")
 
     on-init {
@@ -52,14 +56,20 @@ task prevent-revert.a {
         uboot_unsetenv(uboot-env, "a.nerves_fw_architecture")
         # Clear out the old image using TRIM. This requires --enable-trim
         trim(${ROOTFS_A_PART_OFFSET}, ${ROOTFS_A_PART_COUNT})
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
         trim(${BOOT_A_PART_OFFSET}, ${BOOT_A_PART_COUNT})
+<% end %>
     }
 }
 
 task prevent-revert.b {
     # Check that we're running on A
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
     require-partition-offset(0, ${BOOT_A_PART_OFFSET})
     require-partition-offset(1, ${ROOTFS_A_PART_OFFSET})
+<% else %>
+    require-partition-offset(0, ${ROOTFS_A_PART_OFFSET})
+<% end %>
     require-uboot-variable(uboot-env, "nerves_fw_active", "a")
 
     on-init {
@@ -69,7 +79,9 @@ task prevent-revert.b {
         uboot_unsetenv(uboot-env, "b.nerves_fw_architecture")
         # Clear out the image using TRIM. This requires --enable-trim
         trim(${ROOTFS_B_PART_OFFSET}, ${ROOTFS_B_PART_COUNT})
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
         trim(${BOOT_B_PART_OFFSET}, ${BOOT_B_PART_COUNT})
+<% end %>
     }
 }
 
@@ -84,8 +96,12 @@ task prevent-revert.fail {
 ##
 task revert.a {
     # This task reverts to the A partition, so check that we're running on B
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
     require-partition-offset(0, ${BOOT_B_PART_OFFSET})
     require-partition-offset(1, ${ROOTFS_B_PART_OFFSET})
+<% else %>
+    require-partition-offset(0, ${ROOTFS_B_PART_OFFSET})
+<% end %>
     require-uboot-variable(uboot-env, "nerves_fw_active", "b")
 
     # Verify that partition A has the expected platform/architecture
@@ -104,8 +120,12 @@ task revert.a {
 
 task revert.b {
     # This task reverts to the B partition, so check that we're running on A
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
     require-partition-offset(0, ${BOOT_A_PART_OFFSET})
     require-partition-offset(1, ${ROOTFS_A_PART_OFFSET})
+<% else %>
+    require-partition-offset(0, ${ROOTFS_A_PART_OFFSET})
+<% end %>
     require-uboot-variable(uboot-env, "nerves_fw_active", "a")
 
     # Verify that partition B has the expected platform/architecture

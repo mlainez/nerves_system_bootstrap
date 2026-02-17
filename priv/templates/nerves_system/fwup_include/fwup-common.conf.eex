@@ -304,7 +304,8 @@ gpt gpt-b {
 }
 
 <% :mbr -> %>
-# MBR partition layout (default)
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
+# MBR partition layout (with boot partition)
 mbr mbr-a {
     partition 0 {
         block-offset = ${BOOT_A_PART_OFFSET}
@@ -346,6 +347,40 @@ mbr mbr-b {
     }
     # partition 3 is unused
 }
+<% else %>
+# MBR partition layout (no boot partition — kernel loaded by bootloader from rootfs)
+mbr mbr-a {
+    partition 0 {
+        block-offset = ${ROOTFS_A_PART_OFFSET}
+        block-count = ${ROOTFS_A_PART_COUNT}
+        type = 0x83 # Linux
+        boot = true
+    }
+    partition 1 {
+        block-offset = ${APP_PART_OFFSET}
+        block-count = ${APP_PART_COUNT}
+        type = 0x83 # Linux
+        expand = true
+    }
+    # partitions 2, 3 are unused
+}
+
+mbr mbr-b {
+    partition 0 {
+        block-offset = ${ROOTFS_B_PART_OFFSET}
+        block-count = ${ROOTFS_B_PART_COUNT}
+        type = 0x83 # Linux
+        boot = true
+    }
+    partition 1 {
+        block-offset = ${APP_PART_OFFSET}
+        block-count = ${APP_PART_COUNT}
+        type = 0x83 # Linux
+        expand = true
+    }
+    # partitions 2, 3 are unused
+}
+<% end %>
 <% end %>
 
 # Location where installed firmware information is stored.

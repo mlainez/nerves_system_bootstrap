@@ -39,7 +39,7 @@ defmodule NervesBootstrap.FileGenerator do
     generate_from_templates(app, binding)
 
     # Copy additional files from buildroot board directory
-    copy_buildroot_board_files(buildroot_path, board, app)
+    copy_buildroot_board_files(buildroot_path, board, app, binding)
 
     # Create additional directories that might be needed
     create_additional_directories(app)
@@ -286,14 +286,18 @@ defmodule NervesBootstrap.FileGenerator do
     end
   end
 
-  defp copy_buildroot_board_files(buildroot_path, board, app) do
+  defp copy_buildroot_board_files(buildroot_path, board, app, binding) do
+    platform_config = binding[:platform_config]
+
     # Find buildroot board directory
     case find_buildroot_board_directory(buildroot_path, board) do
       nil ->
         Mix.shell().info("No buildroot board directory found for #{board}")
+        # Generate fallback boot config if platform needs it
+        generate_fallback_boot_config(app, platform_config, binding)
 
       board_dir ->
-        copy_boot_cmd_if_exists(board_dir, app)
+        ensure_boot_config(board_dir, app, platform_config, binding)
     end
   end
 
@@ -366,7 +370,10 @@ defmodule NervesBootstrap.FileGenerator do
     end
   end
 
-  defp copy_boot_cmd_if_exists(board_dir, app) do
+  # Ensure boot configuration exists for the platform.
+  # If the Buildroot board directory has a boot.cmd, copy it.
+  # Otherwise, generate a fallback appropriate for the platform.
+  defp ensure_boot_config(board_dir, app, platform_config, binding) do
     boot_cmd_source = Path.join(board_dir, "boot.cmd")
 
     if File.exists?(boot_cmd_source) do
@@ -375,7 +382,133 @@ defmodule NervesBootstrap.FileGenerator do
 
       boot_cmd_dest = Path.join(uboot_dir, "boot.cmd")
       File.cp!(boot_cmd_source, boot_cmd_dest)
-      Mix.shell().info("Copied boot.cmd to #{boot_cmd_dest}")
+      Mix.shell().info("Copied boot.cmd from Buildroot board directory")
+    else
+      generate_fallback_boot_config(app, platform_config, binding)
+    end
+  end
+
+  # Generate platform-appropriate fallback boot configuration when the
+  # Buildroot board directory doesn't provide one.
+  defp generate_fallback_boot_config(app, platform_config, binding) do
+    case platform_config.platform do
+      p when p in [:x86_64] ->
+        generate_extlinux_conf(app, platform_config, binding)
+
+      p when p in [:rpi, :rpi4] ->
+        # RPi uses its own proprietary bootloader (start4.elf), no boot.cmd needed
+        :ok
+
+      _ ->
+        # U-Boot platforms get a fallback boot.cmd
+        generate_fallback_boot_cmd(app, platform_config, binding)
+    end
+  end
+
+  # Generate a fallback boot.cmd for U-Boot platforms.
+  # This creates a Nerves-compatible A/B boot script.
+  defp generate_fallback_boot_cmd(app, platform_config, binding) do
+    dtb_name = platform_config.dtb_name
+    kernel_name = platform_config.kernel_name
+    dtso_names = binding[:dtso_names] || []
+
+    kernel_addr = get_kernel_load_addr(platform_config)
+    fdt_addr = get_fdt_load_addr(platform_config)
+    ramdisk_addr = "-"
+
+    boot_cmd = """
+    # Nerves U-Boot boot script
+    # Auto-generated — customize as needed for your board
+    #
+    # This script implements A/B partition switching for Nerves firmware updates.
+
+    # Determine active partition
+    if test "${nerves_fw_active}" = "b"; then
+        setenv bootpart ${BOOT_B_PART_OFFSET}
+        setenv rootpart ${ROOTFS_B_PART_OFFSET}
+    else
+        setenv bootpart ${BOOT_A_PART_OFFSET}
+        setenv rootpart ${ROOTFS_A_PART_OFFSET}
+    fi
+
+    setenv bootargs console=${console} root=/dev/mmcblk0p${rootpart} rootfstype=squashfs rootwait
+
+    # Load kernel
+    fatload mmc 0:${bootpart} #{kernel_addr} #{kernel_name}
+    #{if dtb_name do
+      "# Load device tree\nfatload mmc 0:${bootpart} #{fdt_addr} #{dtb_name}"
+    else
+      "# No device tree for this platform"
+    end}
+    #{Enum.map_join(dtso_names, "\n", fn dtso -> "# Load device tree overlay: #{dtso}\nfatload mmc 0:${bootpart} ${fdtoverlay_addr_r} #{dtso}\nfdt apply ${fdtoverlay_addr_r}" end)}
+
+    # Boot
+    #{get_boot_command(platform_config, kernel_addr, fdt_addr, ramdisk_addr)}
+    """
+
+    uboot_dir = Path.join([app, "uboot"])
+    File.mkdir_p!(uboot_dir)
+    boot_cmd_path = Path.join(uboot_dir, "boot.cmd")
+    File.write!(boot_cmd_path, boot_cmd)
+    Mix.shell().info("Generated fallback boot.cmd for #{platform_config.platform}")
+  end
+
+  # Generate extlinux.conf for x86_64/EFI platforms that use syslinux-style boot.
+  defp generate_extlinux_conf(app, platform_config, _binding) do
+    kernel_name = platform_config.kernel_name
+
+    extlinux_conf = """
+    # Nerves extlinux boot configuration
+    # Auto-generated — customize as needed
+    DEFAULT nerves
+    TIMEOUT 0
+
+    LABEL nerves
+        LINUX /#{kernel_name}
+        APPEND root=/dev/sda2 rootfstype=squashfs rootwait console=ttyS0,115200
+    """
+
+    # extlinux.conf is typically placed in the boot partition,
+    # but for Nerves we put it in the rootfs overlay for the post-build
+    # script to copy to the right place
+    extlinux_dir = Path.join([app, "rootfs_overlay", "boot", "extlinux"])
+    File.mkdir_p!(extlinux_dir)
+    extlinux_path = Path.join(extlinux_dir, "extlinux.conf")
+    File.write!(extlinux_path, String.trim_leading(extlinux_conf))
+    Mix.shell().info("Generated extlinux.conf for EFI/x86_64 platform")
+  end
+
+  defp get_kernel_load_addr(platform_config) do
+    case platform_config.platform do
+      p when p in [:generic_arm64, :rpi4] -> "0x44000000"
+      p when p in [:generic_arm, :sunxi_spl, :sunxi_standard] -> "0x42000000"
+      :riscv64 -> "0x84000000"
+      _ -> "0x42000000"
+    end
+  end
+
+  defp get_fdt_load_addr(platform_config) do
+    case platform_config.platform do
+      p when p in [:generic_arm64, :rpi4] -> "0x4a000000"
+      p when p in [:generic_arm, :sunxi_spl, :sunxi_standard] -> "0x43000000"
+      :riscv64 -> "0x86000000"
+      _ -> "0x43000000"
+    end
+  end
+
+  defp get_boot_command(platform_config, kernel_addr, fdt_addr, ramdisk_addr) do
+    case platform_config.platform do
+      p when p in [:generic_arm64, :rpi4] ->
+        "booti #{kernel_addr} #{ramdisk_addr} #{fdt_addr}"
+
+      p when p in [:generic_arm, :sunxi_spl, :sunxi_standard] ->
+        "bootz #{kernel_addr} #{ramdisk_addr} #{fdt_addr}"
+
+      :riscv64 ->
+        "booti #{kernel_addr} #{ramdisk_addr} #{fdt_addr}"
+
+      _ ->
+        "bootm #{kernel_addr} #{ramdisk_addr} #{fdt_addr}"
     end
   end
 

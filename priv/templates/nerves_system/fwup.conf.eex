@@ -104,9 +104,11 @@ task complete {
         fat_mkdir(${BOOT_A_PART_OFFSET}, "/boot")
         fat_mkdir(${BOOT_A_PART_OFFSET}, "/boot/extlinux")
 <% _ -> %>
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
         # Initialize FAT32 boot partition for MBR
         fat_mkfs(${BOOT_A_PART_OFFSET}, ${BOOT_A_PART_COUNT})
         fat_setlabel(${BOOT_A_PART_OFFSET}, "BOOT-A")
+<% end %>
 <% end %>
 
         uboot_clearenv(uboot-env)
@@ -157,6 +159,9 @@ task complete {
     # x86_64 UEFI boot sequence
     on-resource bootx64.efi { fat_write(${BOOT_A_PART_OFFSET}, "EFI/BOOT/BOOTX64.EFI") }
     on-resource kernel.img { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+<% :riscv64 -> %>
+    # RISC-V: U-Boot is written raw, kernel is loaded from rootfs
+    on-resource u-boot.bin { raw_write(${UBOOT_OFFSET}) }
 <% _ -> %>
     # Generic U-Boot boot sequence
     on-resource u-boot.bin { fat_write(${BOOT_A_PART_OFFSET}, "u-boot.bin") }
@@ -170,7 +175,7 @@ task complete {
 <% end %>
 
     # Universal boot script (for U-Boot platforms) - complete task
-<%= if "boot.scr" in platform_config.boot_files do %>
+<%= if Map.get(platform_config, :needs_boot_partition, true) and "boot.scr" in platform_config.boot_files do %>
     on-resource boot.scr { fat_write(${BOOT_A_PART_OFFSET}, "boot.scr") }
 <% end %>
 
@@ -183,7 +188,9 @@ task complete {
         # Clear out any old data in the B partition that might be mistaken for
         # a file system. This is mostly to avoid confusion in humans when
         # reprogramming SDCards with unknown contents.
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
         raw_memset(${BOOT_B_PART_OFFSET}, 256, 0xff)
+<% end %>
         raw_memset(${ROOTFS_B_PART_OFFSET}, 256, 0xff)
 
         # Invalidate the application data partition so that it is guaranteed to
@@ -196,7 +203,12 @@ task complete {
 
 task upgrade.a {
     # This task upgrades the A partition
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
+    require-partition-offset(0, ${BOOT_B_PART_OFFSET})
     require-partition-offset(1, ${ROOTFS_B_PART_OFFSET})
+<% else %>
+    require-partition-offset(0, ${ROOTFS_B_PART_OFFSET})
+<% end %>
 
     # Verify the expected platform/architecture
     require-uboot-variable(uboot-env, "b.nerves_fw_platform", "${NERVES_FW_PLATFORM}")
@@ -213,9 +225,11 @@ task upgrade.a {
         uboot_unsetenv(uboot-env, "a.nerves_fw_architecture")
         uboot_unsetenv(uboot-env, "a.nerves_fw_uuid")
 
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
         # Reset the previous contents of the A boot partition
         fat_mkfs(${BOOT_A_PART_OFFSET}, ${BOOT_A_PART_COUNT})
         fat_setlabel(${BOOT_A_PART_OFFSET}, "BOOT-A")
+<% end %>
 
         # Indicate that the entire partition can be cleared
         trim(${ROOTFS_A_PART_OFFSET}, ${ROOTFS_A_PART_COUNT})
@@ -248,6 +262,9 @@ task upgrade.a {
 <% :x86_64 -> %>
     on-resource bootx64.efi { fat_write(${BOOT_A_PART_OFFSET}, "EFI/BOOT/BOOTX64.EFI") }
     on-resource kernel.img { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+<% :riscv64 -> %>
+    # RISC-V: U-Boot is written raw, kernel is loaded from rootfs
+    on-resource u-boot.bin { raw_write(${UBOOT_OFFSET}) }
 <% _ -> %>
     on-resource u-boot.bin { fat_write(${BOOT_A_PART_OFFSET}, "u-boot.bin") }
     on-resource kernel.img { fat_write(${BOOT_A_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
@@ -260,7 +277,7 @@ task upgrade.a {
 <% end %>
 
     # Universal boot script (for U-Boot platforms) - upgrade.a task
-<%= if "boot.scr" in platform_config.boot_files do %>
+<%= if Map.get(platform_config, :needs_boot_partition, true) and "boot.scr" in platform_config.boot_files do %>
     on-resource boot.scr { fat_write(${BOOT_A_PART_OFFSET}, "boot.scr") }
 <% end %>
 
@@ -301,7 +318,12 @@ task upgrade.a {
 
 task upgrade.b {
     # This task upgrades the B partition
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
+    require-partition-offset(0, ${BOOT_A_PART_OFFSET})
     require-partition-offset(1, ${ROOTFS_A_PART_OFFSET})
+<% else %>
+    require-partition-offset(0, ${ROOTFS_A_PART_OFFSET})
+<% end %>
 
     # Verify the expected platform/architecture
     require-uboot-variable(uboot-env, "a.nerves_fw_platform", "${NERVES_FW_PLATFORM}")
@@ -317,9 +339,11 @@ task upgrade.b {
         uboot_unsetenv(uboot-env, "b.nerves_fw_architecture")
         uboot_unsetenv(uboot-env, "b.nerves_fw_uuid")
 
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
         # Reset the previous contents of the B boot partition
         fat_mkfs(${BOOT_B_PART_OFFSET}, ${BOOT_B_PART_COUNT})
         fat_setlabel(${BOOT_B_PART_OFFSET}, "BOOT-B")
+<% end %>
 
         trim(${ROOTFS_B_PART_OFFSET}, ${ROOTFS_B_PART_COUNT})
     }
@@ -351,6 +375,9 @@ task upgrade.b {
 <% :x86_64 -> %>
     on-resource bootx64.efi { fat_write(${BOOT_B_PART_OFFSET}, "EFI/BOOT/BOOTX64.EFI") }
     on-resource kernel.img { fat_write(${BOOT_B_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
+<% :riscv64 -> %>
+    # RISC-V: U-Boot is written raw, kernel is loaded from rootfs
+    on-resource u-boot.bin { raw_write(${UBOOT_OFFSET}) }
 <% _ -> %>
     on-resource u-boot.bin { fat_write(${BOOT_B_PART_OFFSET}, "u-boot.bin") }
     on-resource kernel.img { fat_write(${BOOT_B_PART_OFFSET}, "<%= platform_config.kernel_name %>") }
@@ -363,7 +390,7 @@ task upgrade.b {
 <% end %>
 
     # Universal boot script (for U-Boot platforms) - upgrade.b task
-<%= if "boot.scr" in platform_config.boot_files do %>
+<%= if Map.get(platform_config, :needs_boot_partition, true) and "boot.scr" in platform_config.boot_files do %>
     on-resource boot.scr { fat_write(${BOOT_B_PART_OFFSET}, "boot.scr") }
 <% end %>
 
