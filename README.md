@@ -9,9 +9,12 @@ Clone this repo and install dependencies:
 
 ```bash
 mix deps.get
+```
 
-
+```
 Usage: mix nerves.system.bootstrap <board> [options]
+
+<board> should be a defconfig filename, without the _defconfig suffix (raspberrypi4 or pine64 for instance).
 
 Options:
   --buildroot PATH            Path to a local Buildroot source tree
