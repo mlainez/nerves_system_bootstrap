@@ -626,7 +626,68 @@ defmodule NervesBootstrap.DefconfigProcessor do
     BR2_LINUX_KERNEL_PATCH="${NERVES_DEFCONFIG_DIR}/linux"
     """
 
-    content <> nerves_config
+    result = content <> nerves_config
+
+    # If the source defconfig enables rpi-firmware, inject the custom version
+    # required by the Nerves patch (0009) to avoid a build-time $(error).
+    # Read the default version dynamically from rpi-firmware.mk.
+    if content =~ ~r/BR2_PACKAGE_RPI_FIRMWARE=y/ do
+      append_rpi_firmware_version(result)
+    else
+      result
+    end
+  end
+
+  # Reads the default RPI_FIRMWARE_VERSION from rpi-firmware.mk in the Buildroot
+  # tree and appends BR2_PACKAGE_RPI_FIRMWARE_CUSTOM_VERSION if it is not already
+  # set in the defconfig content.
+  defp append_rpi_firmware_version(content) do
+    if content =~ ~r/BR2_PACKAGE_RPI_FIRMWARE_CUSTOM_VERSION=/ do
+      # Already set by the source defconfig — nothing to do
+      content
+    else
+      firmware_version = get_rpi_firmware_default_version()
+
+      Mix.shell().info(
+        "RPi firmware detected — setting BR2_PACKAGE_RPI_FIRMWARE_CUSTOM_VERSION=\"#{firmware_version}\""
+      )
+
+      content <>
+        """
+
+        # RPi firmware version (required by Nerves patch)
+        BR2_PACKAGE_RPI_FIRMWARE_CUSTOM_VERSION="#{firmware_version}"
+        """
+    end
+  end
+
+  # Extracts the default RPI_FIRMWARE_VERSION from the Buildroot rpi-firmware.mk.
+  # Falls back to a known default if the file cannot be read.
+  defp get_rpi_firmware_default_version do
+    br_path = NervesBootstrap.BuildrootManager.nerves_system_br_path()
+    mk_path = Path.join([br_path, "buildroot", "package", "rpi-firmware", "rpi-firmware.mk"])
+
+    case File.read(mk_path) do
+      {:ok, mk_content} ->
+        case Regex.run(~r/^RPI_FIRMWARE_VERSION\s*=\s*(\S+)/m, mk_content) do
+          [_, version] ->
+            version
+
+          _ ->
+            Mix.shell().error(
+              "Could not parse RPI_FIRMWARE_VERSION from #{mk_path}, using known default"
+            )
+
+            "063bcab6c8a90efb0d19f69d88cbbc7ec79cab68"
+        end
+
+      {:error, reason} ->
+        Mix.shell().error(
+          "Could not read #{mk_path}: #{reason}, using known default firmware version"
+        )
+
+        "063bcab6c8a90efb0d19f69d88cbbc7ec79cab68"
+    end
   end
 
   defp system_name_lines(app_name) do
