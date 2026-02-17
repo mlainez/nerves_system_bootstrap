@@ -607,27 +607,24 @@ defmodule NervesBootstrap.DefconfigProcessor do
     BR2_TARGET_ROOTFS_SQUASHFS4_LZ4=y
 
     # Filesystem tools
-    BR2_PACKAGE_E2FSPROGS=y
     BR2_PACKAGE_F2FS_TOOLS=y
-    BR2_PACKAGE_HOST_F2FS_TOOLS=y
 
     # Busybox configuration for Nerves
-    BR2_PACKAGE_BUSYBOX=y
     BR2_PACKAGE_BUSYBOX_CONFIG="${BR2_EXTERNAL_NERVES_PATH}/board/nerves-common/busybox.config"
 
-    # Additional Nerves packages
+    # Nerves meta-package (selects erlinit, erlang, fwup, boardid, openssl,
+    # ncurses, nerves_heart, uboot-tools, host-fwup, squashfs, rng-tools)
+    BR2_PACKAGE_NERVES_CONFIG=y
+
+    # Additional Nerves packages (not covered by nerves-config)
     BR2_PACKAGE_CA_CERTIFICATES=y
     BR2_PACKAGE_LIBP11=y
     BR2_PACKAGE_UNIXODBC=y
     BR2_PACKAGE_CAIRO=y
     BR2_PACKAGE_DTC=y
     BR2_PACKAGE_LIBMNL=y
-    BR2_PACKAGE_LIBNL=y
-    BR2_NERVES_ADDITIONAL_IMAGE_FILES="${NERVES_DEFCONFIG_DIR}/fwup.conf"
     BR2_PACKAGE_NBTTY=y
-    BR2_PACKAGE_BOARDID=y
-    BR2_PACKAGE_NERVES_CONFIG=y
-    BR2_PACKAGE_NERVES_CONFIG_ACCEPT_RNG_NOTICE=y
+    BR2_NERVES_ADDITIONAL_IMAGE_FILES="${NERVES_DEFCONFIG_DIR}/fwup.conf"
 
     # Kernel
     BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y

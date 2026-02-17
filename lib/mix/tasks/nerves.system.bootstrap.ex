@@ -122,8 +122,23 @@ defmodule Mix.Tasks.Nerves.System.Bootstrap do
         Mix.raise("The --buildroot-external path does not exist: #{external_path}")
       end
 
-      buildroot_path = Path.join(external_path, "buildroot")
       defconfig_path = Path.join([external_path, "configs", "#{board}_defconfig"])
+
+      # The external tree provides defconfigs and packages, but Buildroot
+      # itself is either:
+      #   1. Alongside the external tree (external_path/buildroot) — common
+      #      for forks that bundle Buildroot as a submodule
+      #   2. Downloaded by nerves_system_br — the standard Nerves approach
+      bundled_buildroot = Path.join(external_path, "buildroot")
+
+      buildroot_path =
+        if File.dir?(bundled_buildroot) do
+          bundled_buildroot
+        else
+          # Use nerves_system_br's Buildroot (download if needed)
+          BuildrootManager.determine_buildroot(opts)
+        end
+
       {buildroot_path, defconfig_path}
     else
       buildroot_path = BuildrootManager.determine_buildroot(opts)
@@ -133,9 +148,12 @@ defmodule Mix.Tasks.Nerves.System.Bootstrap do
   end
 
   defp display_success_message(app, board) do
+    br_version = BuildrootManager.get_nerves_br_version()
+
     Mix.shell().info("""
 
     Generated Nerves system for #{board} in #{app}/
+    Buildroot version: #{br_version} (from nerves_system_br)
 
     Files created:
       nerves_defconfig          Nerves Buildroot configuration
@@ -144,6 +162,8 @@ defmodule Mix.Tasks.Nerves.System.Bootstrap do
       fwup-ops.conf             Runtime operations
       fwup_include/             Common fwup includes
       mix.exs                   Project file
+      Config.in                 BR2_EXTERNAL user config (sourced by nerves_system_br)
+      external.mk               User package includes (included by nerves_system_br)
       post-build.sh             Buildroot post-build hook
       post-createfs.sh          Buildroot post-createfs hook
       rootfs_overlay/           Root filesystem overlay

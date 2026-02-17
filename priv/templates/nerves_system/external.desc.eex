@@ -1,2 +1,0 @@
-name: <%= String.upcase(app) %>
-desc: <%= board_description %> Nerves System

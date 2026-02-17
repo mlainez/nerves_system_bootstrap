@@ -3,8 +3,10 @@
 set -e
 
 # Post-build script for <%= module_name %>
-# This script is called from buildroot after the rootfs has been built
-# but before it is packaged. You can use this to customize the rootfs.
+#
+# This runs BEFORE nerves_system_br's common post-build.sh which creates
+# /usr/lib/os-release and scrubs unnecessary files from the target.
+# See BR2_ROOTFS_POST_BUILD_SCRIPT in nerves_defconfig for ordering.
 
 # Create the fwup ops script for handling MicroSD/eMMC operations at runtime
 # NOTE: revert.fw is the previous, more limited version of this. ops.fw is
@@ -15,23 +17,11 @@ ln -sf ops.fw $TARGET_DIR/usr/share/fwup/revert.fw
 
 # Copy the fwup includes to the images dir
 cp -rf $NERVES_DEFCONFIG_DIR/fwup_include $BINARIES_DIR
-
-# Compile U-Boot boot script if boot.cmd exists for this specific board
+<%= if platform_config.needs_boot_partition do %>
+# Compile U-Boot boot script if boot.cmd exists for this board
 if [ -f "$NERVES_DEFCONFIG_DIR/uboot/boot.cmd" ]; then
-    echo "Compiling U-Boot boot script for this board..."
     $HOST_DIR/bin/mkimage -C none -A <%= uboot_arch %> -T script \
         -d "$NERVES_DEFCONFIG_DIR/uboot/boot.cmd" \
         "$BINARIES_DIR/boot.scr"
-    echo "✓ Compiled board-specific boot.cmd to boot.scr"
-else
-    echo "Info: No board-specific boot.cmd found, U-Boot will use default boot behavior"
 fi
-
-# Add your custom post-build steps here
-# Examples:
-# - Copy additional files to $TARGET_DIR
-# - Modify configuration files
-# - Set up additional services
-# - Install custom packages
-
-echo "Post-build script completed for <%= app %>"
+<% end %>
