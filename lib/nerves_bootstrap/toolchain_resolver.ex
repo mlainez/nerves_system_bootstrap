@@ -32,7 +32,8 @@ defmodule NervesBootstrap.ToolchainResolver do
 
   @doc """
   Finds a release matching the requested version with flexible matching.
-  Supports partial version matching (e.g., "14.2" matches "v14.2.0").
+  Supports partial version matching (e.g., "14.2" matches "v14.2.0" but not "v14.20.0").
+  When multiple releases match, the highest version is returned.
   """
   def find_matching_release(releases, version_number) do
     # First try exact match
@@ -44,19 +45,50 @@ defmodule NervesBootstrap.ToolchainResolver do
     if exact_match do
       exact_match
     else
-      # Try partial match - find releases that start with the version
-      partial_match =
-        Enum.find(releases, fn release ->
-          tag = release["tag_name"]
-          # Remove 'v' prefix and check if it starts with the version number
-          case String.replace_prefix(tag, "v", "") do
-            # No 'v' prefix found
-            ^tag -> false
-            version_part -> String.starts_with?(version_part, version_number)
-          end
-        end)
+      # Try partial match — the tag version must start with version_number
+      # followed by either a dot or end-of-string (so "14.2" matches "14.2.0"
+      # but not "14.20.0")
+      pattern = Regex.compile!("^" <> Regex.escape(version_number) <> "($|\\.)")
 
-      partial_match
+      releases
+      |> Enum.filter(fn release ->
+        tag = release["tag_name"]
+
+        case String.replace_prefix(tag, "v", "") do
+          ^tag -> false
+          version_part -> Regex.match?(pattern, version_part)
+        end
+      end)
+      |> Enum.sort_by(
+        fn release ->
+          release["tag_name"]
+          |> String.replace_prefix("v", "")
+          |> version_to_sortable()
+        end,
+        :desc
+      )
+      |> List.first()
+    end
+  end
+
+  # Converts a version string to a sortable tuple {major, minor, patch}.
+  # Gracefully handles non-numeric components by treating them as 0.
+  defp version_to_sortable(version) do
+    parts =
+      version
+      |> String.split(".")
+      |> Enum.map(fn part ->
+        case Integer.parse(part) do
+          {n, _} -> n
+          :error -> 0
+        end
+      end)
+
+    case parts do
+      [major] -> {major, 0, 0}
+      [major, minor] -> {major, minor, 0}
+      [major, minor, patch | _] -> {major, minor, patch}
+      _ -> {0, 0, 0}
     end
   end
 
@@ -146,6 +178,9 @@ defmodule NervesBootstrap.ToolchainResolver do
                 {:ok, data} when is_list(data) ->
                   {:ok, data}
 
+                {:ok, %{"message" => message}} ->
+                  {:error, "GitHub API error: #{message}"}
+
                 {:ok, data} ->
                   {:error, "Expected list but got: #{inspect(data)}"}
 
@@ -154,8 +189,22 @@ defmodule NervesBootstrap.ToolchainResolver do
               end
 
             {:ok, %{status: 200, body: body}} when is_list(body) ->
-              # Body is already parsed JSON
+              # Body is already parsed JSON (list of releases)
               {:ok, body}
+
+            {:ok, %{status: 200, body: %{"message" => message}}} ->
+              # Body is already parsed JSON but is a map (e.g. rate limit error)
+              {:error, "GitHub API error: #{message}"}
+
+            {:ok, %{status: 200, body: body}} when is_map(body) ->
+              {:error, "Expected list but got map: #{inspect(Map.keys(body))}"}
+
+            {:ok, %{status: 403, body: body}} when is_map(body) ->
+              message = body["message"] || "Forbidden"
+              {:error, "GitHub API rate limited: #{message}"}
+
+            {:ok, %{status: 403, body: body}} when is_binary(body) ->
+              {:error, "GitHub API rate limited: #{body}"}
 
             {:ok, %{status: status}} ->
               {:error, "HTTP #{status}"}
@@ -166,30 +215,46 @@ defmodule NervesBootstrap.ToolchainResolver do
 
         {:error, _} ->
           # Fallback to curl if req is not available
-          case System.cmd("curl", ["-s", "-H", "User-Agent: nerves-system-bootstrap", url]) do
-            {response, 0} ->
-              case Jason.decode(response) do
-                {:ok, data} when is_list(data) ->
-                  {:ok, data}
-
-                {:ok, data} ->
-                  {:error, "Expected list but got: #{inspect(data)}"}
-
-                {:error, reason} ->
-                  {:error, "JSON decode error: #{inspect(reason)}"}
-              end
-
-            {error, exit_code} ->
-              {:error, "curl failed (#{exit_code}): #{error}"}
-          end
+          fetch_github_releases_via_curl(url)
       end
     rescue
       e -> {:error, "Exception: #{inspect(e)}"}
     end
   end
 
+  defp fetch_github_releases_via_curl(url) do
+    case System.cmd("curl", [
+           "-s",
+           "--connect-timeout",
+           "10",
+           "--max-time",
+           "30",
+           "-H",
+           "User-Agent: nerves-system-bootstrap",
+           url
+         ]) do
+      {response, 0} ->
+        case Jason.decode(response) do
+          {:ok, data} when is_list(data) ->
+            {:ok, data}
+
+          {:ok, %{"message" => message}} ->
+            {:error, "GitHub API error: #{message}"}
+
+          {:ok, data} ->
+            {:error, "Expected list but got: #{inspect(data)}"}
+
+          {:error, reason} ->
+            {:error, "JSON decode error: #{inspect(reason)}"}
+        end
+
+      {error, exit_code} ->
+        {:error, "curl failed (#{exit_code}): #{error}"}
+    end
+  end
+
   defp get_fallback_url(toolchain_name, version) do
-    Mix.shell().info("⚠️ Using fallback URL generation method")
+    Mix.shell().error("Using fallback URL generation method")
     Mix.shell().info("💡 This requires setting environment variables with the correct hashes")
 
     # Extract version number from requirement string like "~> 14.2"

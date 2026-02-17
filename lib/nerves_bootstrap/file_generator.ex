@@ -90,7 +90,7 @@ defmodule NervesBootstrap.FileGenerator do
       dep_string: fn {name, version} -> "{:#{name}, \"#{version}\", runtime: false}" end,
       architecture: get_architecture(toolchain_dep),
       # This could be configurable
-      github_organization: "my-org",
+      github_organization: detect_github_organization(),
       board_description: format_board_description(board),
       target_arch: arch_config.arch,
       target_cpu: arch_config.target_cpu,
@@ -238,7 +238,7 @@ defmodule NervesBootstrap.FileGenerator do
   defp get_uboot_arch(platform_config) do
     # Map platform configurations to U-Boot architecture names for mkimage
     case platform_config.platform do
-      p when p in [:generic_arm64, :rpi4] -> "arm64"
+      p when p in [:generic_arm64] -> "arm64"
       p when p in [:generic_arm, :rpi, :sunxi_spl, :sunxi_standard] -> "arm"
       :x86_64 -> "x86_64"
       :riscv64 -> "riscv64"
@@ -395,7 +395,7 @@ defmodule NervesBootstrap.FileGenerator do
       p when p in [:x86_64] ->
         generate_extlinux_conf(app, platform_config, binding)
 
-      p when p in [:rpi, :rpi4] ->
+      p when p in [:rpi] ->
         # RPi uses its own proprietary bootloader (start4.elf), no boot.cmd needed
         :ok
 
@@ -480,7 +480,7 @@ defmodule NervesBootstrap.FileGenerator do
 
   defp get_kernel_load_addr(platform_config) do
     case platform_config.platform do
-      p when p in [:generic_arm64, :rpi4] -> "0x44000000"
+      p when p in [:generic_arm64] -> "0x44000000"
       p when p in [:generic_arm, :sunxi_spl, :sunxi_standard] -> "0x42000000"
       :riscv64 -> "0x84000000"
       _ -> "0x42000000"
@@ -489,7 +489,7 @@ defmodule NervesBootstrap.FileGenerator do
 
   defp get_fdt_load_addr(platform_config) do
     case platform_config.platform do
-      p when p in [:generic_arm64, :rpi4] -> "0x4a000000"
+      p when p in [:generic_arm64] -> "0x4a000000"
       p when p in [:generic_arm, :sunxi_spl, :sunxi_standard] -> "0x43000000"
       :riscv64 -> "0x86000000"
       _ -> "0x43000000"
@@ -498,7 +498,7 @@ defmodule NervesBootstrap.FileGenerator do
 
   defp get_boot_command(platform_config, kernel_addr, fdt_addr, ramdisk_addr) do
     case platform_config.platform do
-      p when p in [:generic_arm64, :rpi4] ->
+      p when p in [:generic_arm64] ->
         "booti #{kernel_addr} #{ramdisk_addr} #{fdt_addr}"
 
       p when p in [:generic_arm, :sunxi_spl, :sunxi_standard] ->
@@ -595,6 +595,46 @@ defmodule NervesBootstrap.FileGenerator do
       |> Enum.sort()
     else
       []
+    end
+  end
+
+  # Detect GitHub organization/user from the git remote URL of the current
+  # working directory. Falls back to "CHANGE-ME" if no remote is found.
+  defp detect_github_organization do
+    case System.cmd("git", ["remote", "get-url", "origin"], stderr_to_stdout: true) do
+      {url, 0} ->
+        url = String.trim(url)
+
+        org =
+          cond do
+            # SSH: git@github.com:org/repo.git
+            String.contains?(url, "github.com:") ->
+              url
+              |> String.split("github.com:")
+              |> List.last()
+              |> String.split("/")
+              |> List.first()
+
+            # HTTPS: https://github.com/org/repo.git
+            String.contains?(url, "github.com/") ->
+              url
+              |> String.split("github.com/")
+              |> List.last()
+              |> String.split("/")
+              |> List.first()
+
+            true ->
+              nil
+          end
+
+        if org && org != "" do
+          org
+        else
+          "CHANGE-ME"
+        end
+
+      _ ->
+        "CHANGE-ME"
     end
   end
 

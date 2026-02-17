@@ -40,8 +40,8 @@ defmodule NervesBootstrap.DefconfigProcessor do
           validated_version = validate_kernel_version_against_buildroot(version, buildroot_path)
 
           if validated_version != version do
-            Mix.shell().info(
-              "⚠️ Kernel version #{version} not supported by this Buildroot version, using #{validated_version}"
+            Mix.shell().error(
+              "Kernel version #{version} not supported by this Buildroot version, using #{validated_version}"
             )
 
             # Update defconfig with the validated version
@@ -118,7 +118,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
             kernel_version
           )
         else
-          Mix.shell().info("⚠️ Custom Git repo specified but missing URL or version")
+          Mix.shell().error("Custom Git repo specified but missing URL or version")
 
           process_custom_kernel_config(
             defconfig,
@@ -147,7 +147,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
             )
 
           _ ->
-            Mix.shell().info("⚠️ Custom tarball specified but no URL found")
+            Mix.shell().error("Custom tarball specified but no URL found")
 
             process_custom_kernel_config(
               defconfig,
@@ -162,22 +162,11 @@ defmodule NervesBootstrap.DefconfigProcessor do
 
       String.contains?(defconfig, "BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y") ->
         Mix.shell().info(
-          "📋 Using BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y, downloading kernel sources"
+          "Using BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y, downloading kernel sources"
         )
 
         # Determine architecture from defconfig
-        arch_name =
-          cond do
-            defconfig =~ "BR2_aarch64=y" -> "arm64"
-            defconfig =~ "BR2_arm=y" -> "arm"
-            defconfig =~ "BR2_x86_64=y" -> "x86"
-            defconfig =~ "BR2_i386=y" -> "x86"
-            defconfig =~ "BR2_riscv=y" -> "riscv"
-            defconfig =~ "BR2_mips=y" -> "mips"
-            defconfig =~ "BR2_powerpc=y" -> "powerpc"
-            # Default fallback
-            true -> "arm"
-          end
+        arch_name = detect_kernel_arch(defconfig)
 
         # Download kernel sources and extract defconfig
         case download_and_extract_kernel_defconfig(
@@ -195,7 +184,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
             )
 
           :error ->
-            Mix.shell().info("⚠️ Failed to download kernel sources, cannot continue")
+            Mix.shell().error("Failed to download kernel sources, cannot continue")
         end
 
         Mix.shell().info("✅ Kernel defconfig: #{target_kernel_defconfig}")
@@ -244,7 +233,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
               Mix.shell().info("📄 Copied U-Boot fragment: #{fragment} -> uboot/#{fragment_name}")
               acc ++ ["${NERVES_DEFCONFIG_DIR}/uboot/#{fragment_name}"]
             else
-              Mix.shell().info("⚠️ U-Boot fragment not found: #{source_path}")
+              Mix.shell().error("U-Boot fragment not found: #{source_path}")
               acc
             end
           end)
@@ -325,7 +314,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
                 "⚠️ Failed to extract from custom repository, creating fallback config"
               )
 
-              arch = determine_kernel_arch_from_defconfig(defconfig)
+              arch = detect_kernel_arch(defconfig)
               create_minimal_kernel_config(target_kernel_defconfig, extracted_version, arch)
               # Still update nerves_defconfig even with fallback
               update_nerves_defconfig_for_custom_kernel(
@@ -334,8 +323,8 @@ defmodule NervesBootstrap.DefconfigProcessor do
               )
           end
         else
-          Mix.shell().info("⚠️ Custom Git repo specified but missing URL or version")
-          arch = determine_kernel_arch_from_defconfig(defconfig)
+          Mix.shell().error("Custom Git repo specified but missing URL or version")
+          arch = detect_kernel_arch(defconfig)
           create_minimal_kernel_config(target_kernel_defconfig, kernel_version, arch)
         end
 
@@ -353,12 +342,12 @@ defmodule NervesBootstrap.DefconfigProcessor do
 
             # For custom kernel tarballs, we create a minimal defconfig
             # since the exact config will depend on the custom kernel
-            arch = determine_kernel_arch_from_defconfig(defconfig)
+            arch = detect_kernel_arch(defconfig)
             create_minimal_kernel_config(target_kernel_defconfig, extracted_version, arch)
 
           _ ->
-            Mix.shell().info("⚠️ Custom tarball specified but no URL found")
-            arch = determine_kernel_arch_from_defconfig(defconfig)
+            Mix.shell().error("Custom tarball specified but no URL found")
+            arch = detect_kernel_arch(defconfig)
             create_minimal_kernel_config(target_kernel_defconfig, kernel_version, arch)
         end
 
@@ -392,7 +381,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
           if File.exists?(absolute_path) do
             absolute_path
           else
-            Mix.shell().info("⚠️ Specified kernel config file does not exist: #{absolute_path}")
+            Mix.shell().error("Specified kernel config file does not exist: #{absolute_path}")
             nil
           end
 
@@ -447,7 +436,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
                   first_config
 
                 [] ->
-                  Mix.shell().info("⚠️ No kernel config files found")
+                  Mix.shell().error("No kernel config files found")
                   nil
               end
 
@@ -459,8 +448,8 @@ defmodule NervesBootstrap.DefconfigProcessor do
 
     case kernel_defconfig do
       nil ->
-        Mix.shell().info("⚠️ No kernel defconfig found, creating minimal config")
-        arch = determine_kernel_arch_from_defconfig(defconfig)
+        Mix.shell().error("No kernel defconfig found, creating minimal config")
+        arch = detect_kernel_arch(defconfig)
         create_minimal_kernel_config(target_kernel_defconfig, kernel_version, arch)
         # Update nerves_defconfig to point to the created kernel config file
         update_nerves_defconfig_for_custom_kernel(
@@ -481,22 +470,12 @@ defmodule NervesBootstrap.DefconfigProcessor do
   end
 
   defp get_toolchain_prefix(defconfig) do
-    cond do
-      defconfig =~ "BR2_aarch64=y" ->
-        "aarch64-nerves-linux-gnu"
-
-      defconfig =~ "BR2_arm=y" ->
-        "arm-nerves-linux-gnueabihf"
-
-      defconfig =~ "BR2_x86_64=y" ->
-        "x86_64-nerves-linux-musl"
-
-      defconfig =~ "BR2_riscv=y" ->
-        "riscv64-nerves-linux-gnu"
-
-      true ->
-        # Default fallback
-        "arm-nerves-linux-gnueabihf"
+    case detect_kernel_arch(defconfig) do
+      "arm64" -> "aarch64-nerves-linux-gnu"
+      "arm" -> "arm-nerves-linux-gnueabihf"
+      "x86" -> "x86_64-nerves-linux-musl"
+      "riscv" -> "riscv64-nerves-linux-gnu"
+      _ -> "arm-nerves-linux-gnueabihf"
     end
   end
 
@@ -504,8 +483,8 @@ defmodule NervesBootstrap.DefconfigProcessor do
   # For x86_64 (musl-based toolchain), emit a warning but allow it.
   defp get_c_library_config(toolchain_prefix) do
     if String.contains?(toolchain_prefix, "musl") do
-      Mix.shell().info(
-        "WARNING: This toolchain uses musl instead of glibc. " <>
+      Mix.shell().error(
+        "This toolchain uses musl instead of glibc. " <>
           "Nerves officially supports glibc only. Some packages may not work correctly."
       )
 
@@ -725,13 +704,13 @@ defmodule NervesBootstrap.DefconfigProcessor do
             "BR2_TOOLCHAIN_EXTERNAL_GCC_11=y"
 
           _ ->
-            Mix.shell().info("⚠️ Unknown GCC version #{major}, defaulting to GCC 14")
+            Mix.shell().error("Unknown GCC version #{major}, defaulting to GCC 14")
             "BR2_TOOLCHAIN_EXTERNAL_GCC_14=y"
         end
 
       _ ->
-        Mix.shell().info(
-          "⚠️ Could not extract GCC version from URL: #{toolchain_url}, defaulting to GCC 14"
+        Mix.shell().error(
+          "Could not extract GCC version from URL: #{toolchain_url}, defaulting to GCC 14"
         )
 
         "BR2_TOOLCHAIN_EXTERNAL_GCC_14=y"
@@ -783,12 +762,12 @@ defmodule NervesBootstrap.DefconfigProcessor do
               :ok
 
             :error ->
-              Mix.shell().info("❌ Failed to extract defconfig from tarball")
+              Mix.shell().error("Failed to extract defconfig from tarball")
               :error
           end
 
         :error ->
-          Mix.shell().info("❌ Failed to download kernel tarball")
+          Mix.shell().error("Failed to download kernel tarball")
           :error
       end
     after
@@ -800,12 +779,16 @@ defmodule NervesBootstrap.DefconfigProcessor do
   end
 
   defp download_file(url, destination) do
-    case System.cmd("curl", ["-L", "-o", destination, url], stderr_to_stdout: true) do
+    case System.cmd(
+           "curl",
+           ["-L", "--connect-timeout", "10", "--max-time", "300", "-o", destination, url],
+           stderr_to_stdout: true
+         ) do
       {_, 0} ->
         :ok
 
       {output, _} ->
-        Mix.shell().info("❌ curl failed: #{output}")
+        Mix.shell().error("curl failed: #{output}")
         :error
     end
   end
@@ -826,7 +809,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
         end
 
       {output, _} ->
-        Mix.shell().info("❌ tar extraction failed: #{output}")
+        Mix.shell().error("tar extraction failed: #{output}")
         :error
     end
   end
@@ -914,8 +897,8 @@ defmodule NervesBootstrap.DefconfigProcessor do
             |> Enum.sort_by(&version_to_sortable/1, :desc)
             |> List.first()
 
-          Mix.shell().info(
-            "⚠️ No compatible kernel version found for #{kernel_version}, using latest supported: #{latest_supported}"
+          Mix.shell().error(
+            "No compatible kernel version found for #{kernel_version}, using latest supported: #{latest_supported}"
           )
 
           latest_supported || get_default_kernel_version_for_buildroot(buildroot_path)
@@ -978,8 +961,8 @@ defmodule NervesBootstrap.DefconfigProcessor do
     if versions_from_file do
       versions_from_file
     else
-      Mix.shell().info(
-        "⚠️ Could not find kernel version information in Buildroot, using known LTS versions"
+      Mix.shell().error(
+        "Could not find kernel version information in Buildroot, using known LTS versions"
       )
 
       ["6.6.93", "6.6.58", "6.1.114", "5.15.170", "5.10.227", "5.4.285"]
@@ -1053,19 +1036,25 @@ defmodule NervesBootstrap.DefconfigProcessor do
     parts =
       version
       |> String.split(".")
-      |> Enum.map(&String.to_integer/1)
+      |> Enum.map(fn part ->
+        case Integer.parse(part) do
+          {n, _} -> n
+          :error -> 0
+        end
+      end)
 
     # Normalize to {major, minor, patch} for consistent comparison
     case parts do
       [major] -> {major, 0, 0}
       [major, minor] -> {major, minor, 0}
       [major, minor, patch | _] -> {major, minor, patch}
+      _ -> {0, 0, 0}
     end
   end
 
   # Creates a minimal kernel configuration for custom kernels where we don't have a specific defconfig.
   # The arch parameter should be the Buildroot arch string from the defconfig content
-  # (used to call determine_kernel_arch_from_defconfig/1).
+  # The arch parameter should be the Linux arch string from detect_kernel_arch/1.
   defp create_minimal_kernel_config(target_path, kernel_version, arch) do
     arch_config = arch_specific_kernel_config(arch)
 
@@ -1197,7 +1186,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
           Mix.shell().info("✅ Successfully cloned kernel repository")
 
           # Determine architecture for defconfig path
-          arch_name = determine_kernel_arch_from_defconfig(defconfig)
+          arch_name = detect_kernel_arch(defconfig)
 
           # Find the appropriate defconfig in the repository
           case find_kernel_defconfig_in_repo(temp_dir, arch_name, defconfig) do
@@ -1211,12 +1200,12 @@ defmodule NervesBootstrap.DefconfigProcessor do
               :ok
 
             :error ->
-              Mix.shell().info("⚠️ Could not find appropriate defconfig in repository")
+              Mix.shell().error("Could not find appropriate defconfig in repository")
               :error
           end
 
         {output, _} ->
-          Mix.shell().info("❌ Failed to clone repository: #{output}")
+          Mix.shell().error("Failed to clone repository: #{output}")
           :error
       end
     after
@@ -1227,8 +1216,9 @@ defmodule NervesBootstrap.DefconfigProcessor do
     end
   end
 
-  # Determines the kernel architecture from the defconfig content
-  defp determine_kernel_arch_from_defconfig(defconfig) do
+  # Determines the kernel architecture string from Buildroot defconfig content.
+  # Used by all code paths that need to map BR2_* arch flags to Linux arch names.
+  defp detect_kernel_arch(defconfig) do
     cond do
       defconfig =~ "BR2_aarch64=y" -> "arm64"
       defconfig =~ "BR2_arm=y" -> "arm"
@@ -1237,7 +1227,6 @@ defmodule NervesBootstrap.DefconfigProcessor do
       defconfig =~ "BR2_riscv=y" -> "riscv"
       defconfig =~ "BR2_mips=y" -> "mips"
       defconfig =~ "BR2_powerpc=y" -> "powerpc"
-      # Default fallback for Arduino Uno Q
       true -> "arm64"
     end
   end
@@ -1285,40 +1274,94 @@ defmodule NervesBootstrap.DefconfigProcessor do
     end
   end
 
-  # Looks for board-specific defconfig files
-  defp find_board_specific_defconfig(repo_dir, arch_name, _defconfig) do
-    # Look for defconfigs that might be board-specific
-    # Common patterns: qcom_defconfig, imx_defconfig, etc.
+  # Looks for board-specific defconfig files by extracting vendor/board hints
+  # from the Buildroot defconfig content (U-Boot board name, DTB name, etc.)
+  defp find_board_specific_defconfig(repo_dir, arch_name, defconfig) do
     configs_dir = Path.join([repo_dir, "arch", arch_name, "configs"])
 
-    if File.exists?(configs_dir) do
-      # Look for patterns that might match our board
-      potential_configs = [
-        # For Qualcomm boards like Arduino Uno Q
-        "qcom_defconfig",
-        # For i.MX boards
-        "imx_defconfig",
-        # For Allwinner boards
-        "sunxi_defconfig",
-        # For Raspberry Pi
-        "bcm2835_defconfig",
-        # Generic ARM
-        "versatile_defconfig"
-      ]
+    unless File.dir?(configs_dir) do
+      nil
+    else
+      # Extract board/vendor hints from defconfig content
+      hints = extract_board_hints(defconfig)
 
-      found_config =
-        Enum.find(potential_configs, fn config_name ->
-          config_path = Path.join(configs_dir, config_name)
-          File.exists?(config_path)
+      # Search for defconfigs that match any hint
+      all_defconfigs = Path.wildcard(Path.join(configs_dir, "*_defconfig"))
+
+      match =
+        Enum.find(all_defconfigs, fn config_path ->
+          config_name = Path.basename(config_path) |> String.replace_suffix("_defconfig", "")
+
+          Enum.any?(hints, fn hint ->
+            hint != "" and String.contains?(config_name, hint)
+          end)
         end)
 
-      case found_config do
-        nil -> nil
-        config_name -> Path.join(configs_dir, config_name)
-      end
-    else
-      nil
+      match
     end
+  end
+
+  # Extracts board/vendor name hints from Buildroot defconfig content.
+  # These are used to find the best-matching kernel defconfig in a repository.
+  defp extract_board_hints(defconfig) do
+    hints = []
+
+    # U-Boot board defconfig name (e.g., "qcom_defconfig" from BR2_TARGET_UBOOT_BOARD_DEFCONFIG="qcom")
+    hints =
+      case Regex.run(~r/BR2_TARGET_UBOOT_BOARD_DEFCONFIG="([^"]+)"/, defconfig) do
+        [_, name] -> [name | hints]
+        _ -> hints
+      end
+
+    # DTB/DTS name (e.g., "qcom/qrb2210-rb1" -> extract "qcom" and "qrb2210")
+    hints =
+      case Regex.run(~r/BR2_LINUX_KERNEL_INTREE_DTS_NAME="([^"]+)"/, defconfig) do
+        [_, dts_name] ->
+          parts = String.split(dts_name, "/")
+          # Add the vendor prefix (e.g., "qcom")
+          vendor_hints = if length(parts) > 1, do: [hd(parts)], else: []
+          # Add the board prefix (first part before the first dash, e.g., "qrb2210")
+          board_part = List.last(parts)
+
+          board_hints =
+            case String.split(board_part, "-", parts: 2) do
+              [prefix, _] -> [prefix]
+              _ -> []
+            end
+
+          vendor_hints ++ board_hints ++ hints
+
+        _ ->
+          hints
+      end
+
+    # Sunxi/Allwinner detection
+    hints =
+      if defconfig =~ "sunxi" or defconfig =~ ~r/BR2_TARGET_UBOOT_BOARD_DEFCONFIG="sun/ do
+        ["sunxi" | hints]
+      else
+        hints
+      end
+
+    # BCM/Raspberry Pi detection
+    hints =
+      if defconfig =~ "bcm27" or defconfig =~ "raspberrypi" do
+        ["bcm2835" | hints]
+      else
+        hints
+      end
+
+    # i.MX detection
+    hints =
+      if defconfig =~ "BR2_TARGET_UBOOT_BOARD_DEFCONFIG=\"mx" or defconfig =~ "imx" do
+        ["imx" | hints]
+      else
+        hints
+      end
+
+    hints
+    |> Enum.map(&String.downcase/1)
+    |> Enum.uniq()
   end
 
   # Finds any defconfig in the arch directory as a last resort

@@ -83,8 +83,8 @@ defmodule NervesBootstrap.BuildrootManager do
       |> File.read!()
       |> extract_buildroot_version()
     else
-      Mix.shell().info(
-        "WARNING: nerves_system_br create-build.sh not found, using default version 2025.05"
+      Mix.shell().error(
+        "nerves_system_br create-build.sh not found, using default version 2025.05"
       )
 
       "2025.05"
@@ -162,8 +162,8 @@ defmodule NervesBootstrap.BuildrootManager do
             Mix.raise("apply-patches.sh failed (exit #{code}):\n#{output}")
         end
       else
-        Mix.shell().info(
-          "WARNING: Could not find apply-patches.sh or patches directory, skipping patching"
+        Mix.shell().error(
+          "Could not find apply-patches.sh or patches directory, skipping patching"
         )
       end
 
@@ -314,8 +314,8 @@ defmodule NervesBootstrap.BuildrootManager do
         String.trim(version)
 
       _ ->
-        Mix.shell().info(
-          "WARNING: Could not extract Buildroot version from nerves_system_br, using default 2025.05"
+        Mix.shell().error(
+          "Could not extract Buildroot version from nerves_system_br, using default 2025.05"
         )
 
         "2025.05"
