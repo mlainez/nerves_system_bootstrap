@@ -359,10 +359,20 @@ defmodule NervesBootstrap.DefconfigProcessor do
             arch = detect_kernel_arch(defconfig)
             create_minimal_kernel_config(target_kernel_defconfig, extracted_version, arch)
 
+            update_nerves_defconfig_for_custom_kernel(
+              Path.join(target_dir, "nerves_defconfig"),
+              extracted_version
+            )
+
           _ ->
             Mix.shell().error("Custom tarball specified but no URL found")
             arch = detect_kernel_arch(defconfig)
             create_minimal_kernel_config(target_kernel_defconfig, kernel_version, arch)
+
+            update_nerves_defconfig_for_custom_kernel(
+              Path.join(target_dir, "nerves_defconfig"),
+              kernel_version
+            )
         end
 
       # Standard custom config file processing
@@ -907,9 +917,11 @@ defmodule NervesBootstrap.DefconfigProcessor do
 
     updated_content =
       content
-      # Remove only conflicting kernel config options, keep Git repo info
-      |> String.replace(~r/BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y/, "")
-      |> String.replace(~r/BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="[^"]*"/, "")
+      # Remove conflicting kernel config options that conflict with USE_CUSTOM_CONFIG
+      |> String.replace(~r/^BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y\n?/m, "")
+      |> String.replace(~r/^BR2_LINUX_KERNEL_USE_DEFCONFIG=y\n?/m, "")
+      |> String.replace(~r/^BR2_LINUX_KERNEL_DEFCONFIG="[^"]*"\n?/m, "")
+      |> String.replace(~r/^BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="[^"]*"\n?/m, "")
 
     # Try different anchoring points to add the custom config file reference
     updated_content =
