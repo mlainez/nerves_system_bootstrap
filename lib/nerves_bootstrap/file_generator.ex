@@ -575,14 +575,16 @@ defmodule NervesBootstrap.FileGenerator do
         dest = Path.join([app, "package", pkg_name])
         File.mkdir_p!(dest)
 
-        # Copy all files in the package directory
+        # Copy all files and subdirectories in the package directory
         src
         |> File.ls!()
         |> Enum.each(fn file ->
           src_file = Path.join(src, file)
           dest_file = Path.join(dest, file)
 
-          unless File.dir?(src_file) do
+          if File.dir?(src_file) do
+            File.cp_r!(src_file, dest_file)
+          else
             File.cp!(src_file, dest_file)
           end
         end)

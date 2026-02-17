@@ -60,7 +60,9 @@
 #       nerves_runtime will auto-format it. Your applications will need to handle
 #       initializing any expected files and folders.
 
+<%= if Map.get(platform_config, :needs_boot_partition, true) do %>
 -m <%= platform_config.boot_dev_path %>:/boot:vfat:ro,nodev,noexec,nosuid:
+<% end %>
 -m <%= platform_config.app_dev_path %>:/root:f2fs:nodev:
 -m pstore:/sys/fs/pstore:pstore:nodev,noexec,nosuid:
 -m tmpfs:/sys/fs/cgroup:tmpfs:nodev,noexec,nosuid:mode=755,size=1024k

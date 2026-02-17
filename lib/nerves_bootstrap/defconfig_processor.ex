@@ -28,45 +28,6 @@ defmodule NervesBootstrap.DefconfigProcessor do
   end
 
   @doc """
-  Cleans a defconfig file by removing Nerves-incompatible options.
-  """
-  def clean_defconfig_for_nerves(defconfig_path) do
-    content = File.read!(defconfig_path)
-    File.write!(defconfig_path, clean_content_for_nerves(content))
-  end
-
-  @doc """
-  Appends Nerves-specific configuration to a defconfig file.
-  """
-  def append_nerves_config(defconfig_path) do
-    defconfig_content = File.read!(defconfig_path)
-
-    # Validate kernel version is >= 5.4 (Nerves toolchain headers baseline)
-    validate_kernel_version_minimum(defconfig_content)
-
-    result =
-      defconfig_content
-      |> append_nerves_config_to_content()
-      |> deduplicate_defconfig()
-
-    File.write!(defconfig_path, result)
-  end
-
-  @doc """
-  Appends Nerves system name to defconfig.
-  """
-  def append_nerves_system_name(defconfig_path, app_name) do
-    system_config = """
-
-    # Nerves system identification
-    BR2_TARGET_GENERIC_HOSTNAME="#{app_name}"
-    BR2_NERVES_SYSTEM_NAME="#{app_name}"
-    """
-
-    File.write!(defconfig_path, File.read!(defconfig_path) <> system_config)
-  end
-
-  @doc """
   Copies and processes kernel defconfig from Buildroot to target directory.
   """
   def copy_kernel_defconfig(defconfig_path, buildroot_path, target_dir) do
@@ -129,20 +90,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
 
     target_kernel_defconfig = Path.join(target_dir, "linux-#{kernel_version}.defconfig")
 
-    # Handle custom tarball case
-    if String.contains?(defconfig, "BR2_LINUX_KERNEL_CUSTOM_TARBALL=y") do
-      Mix.shell().info("📦 Found custom kernel tarball configuration")
-      # Extract tarball URL if present
-      case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="([^"]+)"/, defconfig) do
-        [_, tarball_url] ->
-          Mix.shell().info("🔗 Custom kernel tarball: #{tarball_url}")
-
-        _ ->
-          Mix.shell().info("⚠️ Custom tarball specified but no URL found")
-      end
-    end
-
-    # First, check if there's a custom kernel configuration (Git repo, tarball, etc.)
+    # Check for custom kernel configuration (Git repo, tarball, etc.)
     cond do
       String.contains?(defconfig, "BR2_LINUX_KERNEL_CUSTOM_GIT=y") ->
         Mix.shell().info("📦 Found custom kernel Git repository configuration")
@@ -1037,7 +985,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
         "⚠️ Could not find kernel version information in Buildroot, using known LTS versions"
       )
 
-      ["6.6.93", "6.6.58", "6.1.114", "5.15.170", "5.10.227", "5.4.285", "4.19.323"]
+      ["6.6.93", "6.6.58", "6.1.114", "5.15.170", "5.10.227", "5.4.285"]
     end
   end
 
@@ -1050,7 +998,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
       supported_versions
       |> Enum.find(fn version ->
         major_minor = extract_major_minor_version(version)
-        major_minor in ["6.6", "6.1", "5.15", "5.10", "5.4", "4.19"]
+        major_minor in ["6.6", "6.1", "5.15", "5.10", "5.4"]
       end)
 
     lts_version || List.first(supported_versions) || "6.1.55"

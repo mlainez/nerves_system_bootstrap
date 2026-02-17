@@ -74,7 +74,7 @@ defmodule NervesBootstrap.PlatformDetector do
           needs_uboot_spl: false,
           needs_boot_partition: true,
           uboot_offset: 16,
-          uboot_env_offset: 8192,
+          uboot_env_offset: 16,
           dev_path: "/dev/mmcblk0",
           boot_dev_path: "/dev/mmcblk0p1",
           app_dev_path: "/dev/mmcblk0p3"
@@ -104,7 +104,7 @@ defmodule NervesBootstrap.PlatformDetector do
           uboot_env_count: "128",
           needs_boot_partition: true,
           uboot_offset: 16,
-          uboot_env_offset: 8192,
+          uboot_env_offset: 16,
           dev_path: "/dev/mmcblk0",
           boot_dev_path: "/dev/mmcblk0p1",
           app_dev_path: "/dev/mmcblk0p3"
@@ -122,7 +122,7 @@ defmodule NervesBootstrap.PlatformDetector do
           needs_uboot_spl: false,
           needs_boot_partition: true,
           uboot_offset: 16,
-          uboot_env_offset: 8192,
+          uboot_env_offset: 16,
           dev_path: "/dev/sda",
           boot_dev_path: "/dev/sda1",
           app_dev_path: "/dev/sda3"
@@ -142,8 +142,8 @@ defmodule NervesBootstrap.PlatformDetector do
           uboot_offset: 16,
           uboot_env_offset: 8192,
           dev_path: "/dev/mmcblk0",
-          boot_dev_path: "/dev/mmcblk0p1",
-          app_dev_path: "/dev/mmcblk0p3"
+          boot_dev_path: nil,
+          app_dev_path: "/dev/mmcblk0p2"
         }
 
       # Generic ARM detection
@@ -158,7 +158,7 @@ defmodule NervesBootstrap.PlatformDetector do
           needs_uboot_spl: false,
           needs_boot_partition: true,
           uboot_offset: 16,
-          uboot_env_offset: 8192,
+          uboot_env_offset: 16,
           dev_path: "/dev/mmcblk0",
           boot_dev_path: "/dev/mmcblk0p1",
           app_dev_path: "/dev/mmcblk0p3"
@@ -176,7 +176,7 @@ defmodule NervesBootstrap.PlatformDetector do
           needs_uboot_spl: false,
           needs_boot_partition: true,
           uboot_offset: 16,
-          uboot_env_offset: 8192,
+          uboot_env_offset: 16,
           dev_path: "/dev/mmcblk0",
           boot_dev_path: "/dev/mmcblk0p1",
           app_dev_path: "/dev/mmcblk0p3"
@@ -194,7 +194,7 @@ defmodule NervesBootstrap.PlatformDetector do
           needs_uboot_spl: false,
           needs_boot_partition: true,
           uboot_offset: 16,
-          uboot_env_offset: 8192,
+          uboot_env_offset: 16,
           dev_path: "/dev/mmcblk0",
           boot_dev_path: "/dev/mmcblk0p1",
           app_dev_path: "/dev/mmcblk0p3"
@@ -213,9 +213,7 @@ defmodule NervesBootstrap.PlatformDetector do
   Returns the block count as an integer.
   """
   def estimate_boot_partition_blocks(platform_config) do
-    unless Map.get(platform_config, :needs_boot_partition, true) do
-      0
-    else
+    if Map.get(platform_config, :needs_boot_partition, true) do
       # Estimate sizes in bytes for what goes in the boot partition
       kernel_estimate = estimate_kernel_size(platform_config)
       dtb_estimate = if platform_config.dtb_name, do: 256 * 1024, else: 0
@@ -228,7 +226,7 @@ defmodule NervesBootstrap.PlatformDetector do
             6 * 1024 * 1024
 
           :x86_64 ->
-            # EFI bootloader + grub.cfg
+            # EFI bootloader
             2 * 1024 * 1024
 
           :sunxi_spl ->
@@ -254,6 +252,8 @@ defmodule NervesBootstrap.PlatformDetector do
       mib = max(mib, 24)
       # Convert MiB to 512-byte blocks
       mib * 2048
+    else
+      0
     end
   end
 
