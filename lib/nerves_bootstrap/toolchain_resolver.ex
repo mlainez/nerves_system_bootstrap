@@ -23,7 +23,10 @@ defmodule NervesBootstrap.ToolchainResolver do
   Gets toolchain URL from GitHub releases API.
   """
   def get_toolchain_url(toolchain_name, version) do
-    Mix.shell().info("🔍 Fetching toolchain URL from GitHub releases for #{toolchain_name} v#{version}")
+    Mix.shell().info(
+      "🔍 Fetching toolchain URL from GitHub releases for #{toolchain_name} v#{version}"
+    )
+
     get_toolchain_url_from_github(toolchain_name, version)
   end
 
@@ -33,22 +36,25 @@ defmodule NervesBootstrap.ToolchainResolver do
   """
   def find_matching_release(releases, version_number) do
     # First try exact match
-    exact_match = Enum.find(releases, fn release ->
-      release["tag_name"] == "v#{version_number}"
-    end)
+    exact_match =
+      Enum.find(releases, fn release ->
+        release["tag_name"] == "v#{version_number}"
+      end)
 
     if exact_match do
       exact_match
     else
       # Try partial match - find releases that start with the version
-      partial_match = Enum.find(releases, fn release ->
-        tag = release["tag_name"]
-        # Remove 'v' prefix and check if it starts with the version number
-        case String.replace_prefix(tag, "v", "") do
-          ^tag -> false  # No 'v' prefix found
-          version_part -> String.starts_with?(version_part, version_number)
-        end
-      end)
+      partial_match =
+        Enum.find(releases, fn release ->
+          tag = release["tag_name"]
+          # Remove 'v' prefix and check if it starts with the version number
+          case String.replace_prefix(tag, "v", "") do
+            # No 'v' prefix found
+            ^tag -> false
+            version_part -> String.starts_with?(version_part, version_number)
+          end
+        end)
 
       partial_match
     end
@@ -56,10 +62,11 @@ defmodule NervesBootstrap.ToolchainResolver do
 
   defp get_toolchain_url_from_github(toolchain_name, version) do
     # Extract version number from requirement string like "~> 14.2"
-    version_number = case version do
-      "~> " <> v -> v
-      v -> v
-    end
+    version_number =
+      case version do
+        "~> " <> v -> v
+        v -> v
+      end
 
     arch_name = @arch_mapping[toolchain_name]
 
@@ -72,7 +79,9 @@ defmodule NervesBootstrap.ToolchainResolver do
 
     case fetch_github_releases(url) do
       {:ok, releases} when is_list(releases) ->
-        Mix.shell().info("🔍 Searching for release v#{version_number} in #{length(releases)} releases...")
+        Mix.shell().info(
+          "🔍 Searching for release v#{version_number} in #{length(releases)} releases..."
+        )
 
         # Find the release matching our version with flexible matching
         target_release = find_matching_release(releases, version_number)
@@ -87,16 +96,22 @@ defmodule NervesBootstrap.ToolchainResolver do
           Mix.shell().info("✅ Found release #{target_release["tag_name"]}")
 
           # Find the asset matching our architecture and linux_x86_64 platform
-          target_asset = Enum.find(target_release["assets"], fn asset ->
-            asset_name = asset["name"]
-            String.contains?(asset_name, arch_name) and
-            String.contains?(asset_name, "linux_x86_64") and
-            String.ends_with?(asset_name, ".tar.xz")
-          end)
+          target_asset =
+            Enum.find(target_release["assets"], fn asset ->
+              asset_name = asset["name"]
+
+              String.contains?(asset_name, arch_name) and
+                String.contains?(asset_name, "linux_x86_64") and
+                String.ends_with?(asset_name, ".tar.xz")
+            end)
 
           unless target_asset do
             available_assets = Enum.map(target_release["assets"], & &1["name"]) |> Enum.join(", ")
-            Mix.shell().error("❌ Could not find #{arch_name}-linux_x86_64 toolchain in release #{target_release["tag_name"]}")
+
+            Mix.shell().error(
+              "❌ Could not find #{arch_name}-linux_x86_64 toolchain in release #{target_release["tag_name"]}"
+            )
+
             Mix.shell().info("📋 Available assets: #{available_assets}")
             Mix.shell().info("🔄 Falling back to environment variable method...")
             get_fallback_url(toolchain_name, version)
@@ -128,16 +143,21 @@ defmodule NervesBootstrap.ToolchainResolver do
               case Jason.decode(body) do
                 {:ok, data} when is_list(data) ->
                   {:ok, data}
+
                 {:ok, data} ->
                   {:error, "Expected list but got: #{inspect(data)}"}
+
                 {:error, reason} ->
                   {:error, "JSON decode error: #{inspect(reason)}"}
               end
+
             {:ok, %{status: 200, body: body}} when is_list(body) ->
               # Body is already parsed JSON
               {:ok, body}
+
             {:ok, %{status: status}} ->
               {:error, "HTTP #{status}"}
+
             {:error, reason} ->
               {:error, "Request failed: #{inspect(reason)}"}
           end
@@ -149,11 +169,14 @@ defmodule NervesBootstrap.ToolchainResolver do
               case Jason.decode(response) do
                 {:ok, data} when is_list(data) ->
                   {:ok, data}
+
                 {:ok, data} ->
                   {:error, "Expected list but got: #{inspect(data)}"}
+
                 {:error, reason} ->
                   {:error, "JSON decode error: #{inspect(reason)}"}
               end
+
             {error, exit_code} ->
               {:error, "curl failed (#{exit_code}): #{error}"}
           end
@@ -168,19 +191,21 @@ defmodule NervesBootstrap.ToolchainResolver do
     Mix.shell().info("💡 This requires setting environment variables with the correct hashes")
 
     # Extract version number from requirement string like "~> 14.2"
-    version_number = case version do
-      "~> " <> v -> v
-      v -> v
-    end
+    version_number =
+      case version do
+        "~> " <> v -> v
+        v -> v
+      end
 
     arch_name = @arch_mapping[toolchain_name]
 
     # Determine the required hash environment variable
-    hash_env_var = if String.contains?(to_string(toolchain_name), "musl") do
-      "NERVES_MUSL_HASH"
-    else
-      "NERVES_GLIBC_HASH"
-    end
+    hash_env_var =
+      if String.contains?(to_string(toolchain_name), "musl") do
+        "NERVES_MUSL_HASH"
+      else
+        "NERVES_GLIBC_HASH"
+      end
 
     # Get hash from environment variable - fail if not provided
     hash = System.get_env(hash_env_var)
@@ -200,7 +225,16 @@ defmodule NervesBootstrap.ToolchainResolver do
       """)
     end
 
-    url = "https://github.com/nerves-project/toolchains/releases/download/v#{version_number}/nerves_toolchain_#{arch_name}-linux_${shell uname -m}-#{version_number}-#{hash}.tar.xz"
+    host_arch =
+      case :erlang.system_info(:system_architecture) |> List.to_string() do
+        "x86_64" <> _ -> "x86_64"
+        "aarch64" <> _ -> "aarch64"
+        _ -> "x86_64"
+      end
+
+    url =
+      "https://github.com/nerves-project/toolchains/releases/download/v#{version_number}/nerves_toolchain_#{arch_name}-linux_#{host_arch}-#{version_number}-#{hash}.tar.xz"
+
     Mix.shell().info("🔗 Generated fallback URL: #{url}")
     url
   end

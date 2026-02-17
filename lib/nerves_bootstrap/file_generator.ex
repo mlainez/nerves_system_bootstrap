@@ -10,9 +10,17 @@ defmodule NervesBootstrap.FileGenerator do
   @doc """
   Generates all files for the Nerves system using templates.
   """
-  def generate_files(app, board, module_name, toolchain_dep, buildroot_path) do
+  def generate_files(app, board, module_name, toolchain_dep, buildroot_path, defconfig_path) do
     # Prepare template binding variables
-    binding = prepare_template_binding(app, board, module_name, toolchain_dep, buildroot_path)
+    binding =
+      prepare_template_binding(
+        app,
+        board,
+        module_name,
+        toolchain_dep,
+        buildroot_path,
+        defconfig_path
+      )
 
     # Generate files from templates
     generate_from_templates(app, binding)
@@ -24,8 +32,14 @@ defmodule NervesBootstrap.FileGenerator do
     create_additional_directories(app)
   end
 
-  defp prepare_template_binding(app, board, module_name, toolchain_dep, buildroot_path) do
-    defconfig_path = Path.join([buildroot_path, "configs", "#{board}_defconfig"])
+  defp prepare_template_binding(
+         app,
+         board,
+         module_name,
+         toolchain_dep,
+         buildroot_path,
+         defconfig_path
+       ) do
     nerves_defconfig_path = Path.join(app, "nerves_defconfig")
     platform_config = NervesBootstrap.PlatformDetector.detect_platform_config(defconfig_path)
     arch_config = NervesBootstrap.PlatformDetector.get_arch_config(toolchain_dep)
@@ -52,7 +66,8 @@ defmodule NervesBootstrap.FileGenerator do
       partition_guids: partition_guids,
       dep_string: fn {name, version} -> "{:#{name}, \"#{version}\", runtime: false}" end,
       architecture: get_architecture(toolchain_dep),
-      github_organization: "my-org",  # This could be configurable
+      # This could be configurable
+      github_organization: "my-org",
       board_description: format_board_description(board),
       target_arch: arch_config.arch,
       target_cpu: arch_config.target_cpu,
@@ -81,6 +96,7 @@ defmodule NervesBootstrap.FileGenerator do
       {:error, _} ->
         # Fallback to relative path if priv_dir not found
         Path.join([File.cwd!(), "priv", "templates", "nerves_system"])
+
       priv_path ->
         # Convert to string if it's a charlist
         path_string = to_string(priv_path)
@@ -125,7 +141,6 @@ defmodule NervesBootstrap.FileGenerator do
       end
 
       Mix.shell().info("✅ Generated #{target_relative_path}")
-
     rescue
       error ->
         Mix.shell().error("❌ Failed to generate #{target_relative_path}: #{inspect(error)}")
@@ -165,10 +180,11 @@ defmodule NervesBootstrap.FileGenerator do
   end
 
   defp format_toolchain_dep({toolchain_name, version}) do
-    toolchain_string = toolchain_name
-    |> to_string()
-    |> String.replace("nerves_toolchain_", "")
-    |> String.replace("_", "-")
+    toolchain_string =
+      toolchain_name
+      |> to_string()
+      |> String.replace("nerves_toolchain_", "")
+      |> String.replace("_", "-")
 
     "#{toolchain_string} #{version}"
   end
@@ -181,12 +197,16 @@ defmodule NervesBootstrap.FileGenerator do
     case arch_config.arch do
       "aarch64" ->
         "-mabi=lp64 -fstack-protector-strong -mcpu=cortex-a53 -fPIE -pie -Wl,-z,now -Wl,-z,relro"
+
       "arm" ->
         "-mthumb -mfpu=neon-vfpv4 -mfloat-abi=hard -mcpu=cortex-a7 -fstack-protector-strong -fPIE -pie -Wl,-z,now -Wl,-z,relro"
+
       "x86_64" ->
         "-m64 -march=x86-64 -fstack-protector-strong -fPIE -pie -Wl,-z,now -Wl,-z,relro"
+
       "riscv64" ->
         "-march=rv64imafdc -mabi=lp64d -fstack-protector-strong -fPIE -pie -Wl,-z,now -Wl,-z,relro"
+
       _ ->
         "-fstack-protector-strong -fPIE -pie -Wl,-z,now -Wl,-z,relro"
     end
@@ -199,7 +219,8 @@ defmodule NervesBootstrap.FileGenerator do
       p when p in [:generic_arm, :rpi, :sunxi_spl, :sunxi_standard] -> "arm"
       :x86_64 -> "x86_64"
       :riscv64 -> "riscv64"
-      _ -> "arm"  # Default fallback
+      # Default fallback
+      _ -> "arm"
     end
   end
 
@@ -207,33 +228,36 @@ defmodule NervesBootstrap.FileGenerator do
     # Find buildroot board directory
     case find_buildroot_board_directory(buildroot_path, board) do
       nil ->
-        IO.puts("Warning: No buildroot board directory found for #{board}")
+        Mix.shell().info("No buildroot board directory found for #{board}, using defaults")
         platform_config
 
       board_dir ->
-        # Look for genimage configuration files
         genimage_files = Path.wildcard(Path.join(board_dir, "genimage*.cfg"))
 
         if length(genimage_files) > 0 do
           genimage_file = hd(genimage_files)
           content = File.read!(genimage_file)
 
-          # Detect partition scheme
-          partition_scheme = cond do
-            String.contains?(content, "gpt = true") or String.contains?(content, "partition-table-type = \"gpt\"") ->
-              :gpt
-            String.contains?(content, "efi") ->
-              :efi
-            true ->
-              :mbr
-          end
+          partition_scheme =
+            cond do
+              String.contains?(content, "gpt = true") or
+                  String.contains?(content, "partition-table-type = \"gpt\"") ->
+                :gpt
 
-          IO.puts("✓ Detected #{partition_scheme} partition scheme from #{Path.basename(genimage_file)}")
+              String.contains?(content, "efi") ->
+                :efi
 
-          # Update platform_config with detected partition scheme
+              true ->
+                :mbr
+            end
+
+          Mix.shell().info(
+            "Detected #{partition_scheme} partition scheme from #{Path.basename(genimage_file)}"
+          )
+
           Map.put(platform_config, :partition_scheme, partition_scheme)
         else
-          IO.puts("Info: No genimage config files found in #{board_dir}, using default MBR")
+          Mix.shell().info("No genimage config found in #{board_dir}, using default MBR")
           platform_config
         end
     end
@@ -243,7 +267,7 @@ defmodule NervesBootstrap.FileGenerator do
     # Find buildroot board directory
     case find_buildroot_board_directory(buildroot_path, board) do
       nil ->
-        IO.puts("Warning: No buildroot board directory found for #{board}")
+        Mix.shell().info("No buildroot board directory found for #{board}")
 
       board_dir ->
         copy_boot_cmd_if_exists(board_dir, app)
@@ -259,27 +283,24 @@ defmodule NervesBootstrap.FileGenerator do
 
       # Search recursively for directories containing genimage.cfg or boot.cmd
       # This approach is generic and will work for any board layout
-      relevant_dirs = all_dirs
-      |> Enum.filter(fn dir ->
-        # Check if directory contains files we're interested in
-        has_genimage = length(Path.wildcard(Path.join(dir, "genimage*.cfg"))) > 0
-        has_boot_cmd = File.exists?(Path.join(dir, "boot.cmd"))
-        has_genimage or has_boot_cmd
-      end)
-      |> Enum.map(&String.trim_trailing(&1, "/"))
+      relevant_dirs =
+        all_dirs
+        |> Enum.filter(fn dir ->
+          # Check if directory contains files we're interested in
+          has_genimage = length(Path.wildcard(Path.join(dir, "genimage*.cfg"))) > 0
+          has_boot_cmd = File.exists?(Path.join(dir, "boot.cmd"))
+          has_genimage or has_boot_cmd
+        end)
+        |> Enum.map(&String.trim_trailing(&1, "/"))
 
       case relevant_dirs do
         [] ->
-          IO.puts("Debug: No directories with genimage.cfg or boot.cmd found in #{board_base_dir}")
           nil
+
         dirs ->
-          # Find the best matching directory for the board
-          best_match = find_best_board_match(dirs, board)
-          IO.puts("Debug: Using board directory: #{best_match}")
-          best_match
+          find_best_board_match(dirs, board)
       end
     else
-      IO.puts("Debug: Board base directory #{board_base_dir} does not exist")
       nil
     end
   end
@@ -288,39 +309,37 @@ defmodule NervesBootstrap.FileGenerator do
     # Try to find the directory that best matches the board name
     # Convert board name variations: arduino_uno_q -> arduino-uno-q, etc.
     board_patterns = [
-      board,                                    # arduino_uno_q
-      String.replace(board, "_", "-"),          # arduino-uno-q
-      String.replace(board, "_", ""),           # arduinounoq
-      String.replace(board, "_defconfig", "")   # remove _defconfig if present
+      # arduino_uno_q
+      board,
+      # arduino-uno-q
+      String.replace(board, "_", "-"),
+      # arduinounoq
+      String.replace(board, "_", ""),
+      # remove _defconfig if present
+      String.replace(board, "_defconfig", "")
     ]
-    # First, try exact matches in directory names
-    exact_match = Enum.find(dirs, fn dir ->
-      dir_name = Path.basename(dir)
-      Enum.any?(board_patterns, fn pattern ->
-        String.contains?(dir_name, pattern)
-      end)
-    end)
 
-    if exact_match do
-      IO.puts("Debug: Found exact match: #{exact_match}")
-      exact_match
-    else
-      # If no exact match, try partial matches in full path
-      partial_match = Enum.find(dirs, fn dir ->
+    # First, try exact matches in directory names
+    exact_match =
+      Enum.find(dirs, fn dir ->
+        dir_name = Path.basename(dir)
+
         Enum.any?(board_patterns, fn pattern ->
-          String.contains?(dir, pattern)
+          String.contains?(dir_name, pattern)
         end)
       end)
 
-      if partial_match do
-        IO.puts("Debug: Found partial match: #{partial_match}")
-        partial_match
-      else
-        # Fallback to first directory
-        first_dir = hd(dirs)
-        IO.puts("Debug: No match found, using first directory: #{first_dir}")
-        first_dir
-      end
+    if exact_match do
+      exact_match
+    else
+      partial_match =
+        Enum.find(dirs, fn dir ->
+          Enum.any?(board_patterns, fn pattern ->
+            String.contains?(dir, pattern)
+          end)
+        end)
+
+      partial_match || hd(dirs)
     end
   end
 
@@ -328,17 +347,12 @@ defmodule NervesBootstrap.FileGenerator do
     boot_cmd_source = Path.join(board_dir, "boot.cmd")
 
     if File.exists?(boot_cmd_source) do
-      # Create uboot directory in the generated system
       uboot_dir = Path.join([app, "uboot"])
       File.mkdir_p!(uboot_dir)
 
-      # Copy boot.cmd to uboot directory
       boot_cmd_dest = Path.join(uboot_dir, "boot.cmd")
       File.cp!(boot_cmd_source, boot_cmd_dest)
-
-      IO.puts("✓ Copied boot.cmd from #{boot_cmd_source} to #{boot_cmd_dest}")
-    else
-      IO.puts("Info: No boot.cmd found in #{board_dir} - will use U-Boot default behavior")
+      Mix.shell().info("Copied boot.cmd to #{boot_cmd_dest}")
     end
   end
 
@@ -357,6 +371,7 @@ defmodule NervesBootstrap.FileGenerator do
             # Convert "qcom/qrb2210-arduino-imola-gigadisplay" to "qrb2210-arduino-imola-gigadisplay.dtbo"
             Path.basename(dtso_path) <> ".dtbo"
           end)
+
         _ ->
           []
       end
@@ -371,8 +386,10 @@ defmodule NervesBootstrap.FileGenerator do
     <<a::32, b::16, c::16, d::16, e::48>> = bytes
 
     # Set version (4) and variant bits according to RFC 4122
-    c = (c &&& 0x0fff) ||| 0x4000  # Version 4
-    d = (d &&& 0x3fff) ||| 0x8000  # Variant 10
+    # Version 4
+    c = (c &&& 0x0FFF) ||| 0x4000
+    # Variant 10
+    d = (d &&& 0x3FFF) ||| 0x8000
 
     :io_lib.format("~8.16.0b-~4.16.0b-~4.16.0b-~4.16.0b-~12.16.0b", [a, b, c, d, e])
     |> List.to_string()
@@ -395,8 +412,10 @@ defmodule NervesBootstrap.FileGenerator do
           rootfs_b_guid: generate_guid(),
           app_guid: generate_guid()
         }
+
       _ ->
-        %{} # MBR doesn't need GUIDs
+        # MBR doesn't need GUIDs
+        %{}
     end
   end
 end

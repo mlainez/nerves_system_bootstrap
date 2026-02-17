@@ -19,8 +19,7 @@ defmodule NervesSystemBootstrap.MixProject do
 
   defp deps do
     [
-      {:igniter, "~> 0.3"},
-      {:nerves_system_br, "~> 1.20", runtime: false}, # adjust version as needed
+      {:nerves_system_br, "~> 1.20", runtime: false},
       {:req, "~> 0.5.0"},
       {:jason, "~> 1.4"}
     ]

@@ -45,7 +45,9 @@ defmodule NervesBootstrap.PlatformDetector do
         dtb_path
         |> Path.basename()
         |> Kernel.<>(".dtb")
-      _ -> nil
+
+      _ ->
+        nil
     end
   end
 
@@ -59,9 +61,9 @@ defmodule NervesBootstrap.PlatformDetector do
     cond do
       # Raspberry Pi detection (more specific to avoid false positives)
       (String.contains?(defconfig, "rpi") and not String.contains?(defconfig, "rpiv2")) or
-      String.contains?(defconfig, "BR2_PACKAGE_RPI") or
-      String.contains?(defconfig, "bcm27") or
-      String.contains?(defconfig, "raspberrypi") ->
+        String.contains?(defconfig, "BR2_PACKAGE_RPI") or
+        String.contains?(defconfig, "bcm27") or
+          String.contains?(defconfig, "raspberrypi") ->
         %{
           platform: :rpi,
           uboot_env_size: "0x20000",
@@ -80,13 +82,14 @@ defmodule NervesBootstrap.PlatformDetector do
 
       # Allwinner/Sunxi detection
       String.contains?(defconfig, "sunxi") or
-      String.contains?(defconfig, "BR2_TARGET_UBOOT_BOARD_DEFCONFIG=\"sun") or
-      (dtb_name && String.starts_with?(dtb_name, "sun")) ->
-        spl_config = if String.contains?(defconfig, "BR2_TARGET_UBOOT_SPL=y") do
-          :sunxi_spl
-        else
-          :sunxi_standard
-        end
+        String.contains?(defconfig, "BR2_TARGET_UBOOT_BOARD_DEFCONFIG=\"sun") or
+          (dtb_name && String.starts_with?(dtb_name, "sun")) ->
+        spl_config =
+          if String.contains?(defconfig, "BR2_TARGET_UBOOT_SPL=y") do
+            :sunxi_spl
+          else
+            :sunxi_standard
+          end
 
         %{
           platform: spl_config,
@@ -118,7 +121,7 @@ defmodule NervesBootstrap.PlatformDetector do
           fwup_ops: :x86_64,
           boot_files: ["bzImage", "grub.cfg"],
           kernel_name: "bzImage",
-          dtb_name: nil,  # x86_64 n'utilise pas de DTB
+          dtb_name: nil,
           needs_uboot_spl: false,
           needs_boot_partition: true,
           uboot_offset: 16,
@@ -138,7 +141,7 @@ defmodule NervesBootstrap.PlatformDetector do
           kernel_name: "Image",
           dtb_name: dtb_name || "generic-riscv64.dtb",
           needs_uboot_spl: false,
-          needs_boot_partition: false,  # RISC-V n'a pas de partition boot
+          needs_boot_partition: false,
           uboot_offset: 16,
           uboot_env_offset: 8192
         }

@@ -473,11 +473,15 @@ defmodule NervesBootstrap.DefconfigProcessor do
       nil ->
         Mix.shell().info("⚠️ No kernel defconfig found, creating minimal config")
         create_minimal_kernel_config(target_kernel_defconfig, kernel_version)
+        # Update nerves_defconfig to point to the created kernel config file
+        update_nerves_defconfig_for_custom_kernel(Path.join(target_dir, "nerves_defconfig"), kernel_version)
 
       config_path ->
         Mix.shell().info("📋 Copying kernel defconfig from #{config_path}")
         File.cp!(config_path, target_kernel_defconfig)
         add_nerves_kernel_configs(target_kernel_defconfig)
+        # Update nerves_defconfig to point to the copied kernel config file
+        update_nerves_defconfig_for_custom_kernel(Path.join(target_dir, "nerves_defconfig"), kernel_version)
     end
   end
 
@@ -607,15 +611,45 @@ defmodule NervesBootstrap.DefconfigProcessor do
     # Remove only conflicting kernel config options, keep Git repo info
     |> String.replace(~r/BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y/, "")
     |> String.replace(~r/BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="[^"]*"/, "")
-    # Add the custom config file reference after the Git configuration
-    |> String.replace(
-      "BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION=",
-      "BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="
-    )
-    |> String.replace(
-      ~r/(BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="[^"]*")/,
-      "\\1\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\""
-    )
+
+    # Try different anchoring points to add the custom config file reference
+    updated_content = cond do
+      # First try: after custom repo version (for Git-based kernels)
+      String.contains?(updated_content, "BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION=") ->
+        String.replace(
+          updated_content,
+          ~r/(BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="[^"]*")/,
+          "\\1\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\""
+        )
+
+      # Second try: after custom version value (for version-based kernels)
+      String.contains?(updated_content, "BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=") ->
+        String.replace(
+          updated_content,
+          ~r/(BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="[^"]*")/,
+          "\\1\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\""
+        )
+
+      # Third try: after use custom config (for custom config kernels)
+      String.contains?(updated_content, "BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y") ->
+        String.replace(
+          updated_content,
+          "BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y",
+          "BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\""
+        )
+
+      # Last fallback: after basic kernel enable
+      String.contains?(updated_content, "BR2_LINUX_KERNEL=y") ->
+        String.replace(
+          updated_content,
+          "BR2_LINUX_KERNEL=y",
+          "BR2_LINUX_KERNEL=y\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\""
+        )
+
+      # If nothing found, append at the end
+      true ->
+        updated_content <> "\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\"\n"
+    end
 
     File.write!(nerves_defconfig_path, updated_content)
     Mix.shell().info("✅ Updated nerves_defconfig to use custom kernel config: ${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig")
