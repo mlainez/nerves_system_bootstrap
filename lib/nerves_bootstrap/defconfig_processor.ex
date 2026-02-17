@@ -5,17 +5,575 @@ defmodule NervesBootstrap.DefconfigProcessor do
   """
 
   @doc """
+  Prepares a complete Nerves defconfig in a single pass.
+
+  Reads the source defconfig once, applies all transformations (cleaning,
+  Nerves config, external reference, system name), deduplicates, and writes
+  the result to `target_path`.
+  """
+  def prepare_nerves_defconfig(source_path, target_path, app_name) do
+    content = File.read!(source_path)
+
+    # Validate kernel version >= 5.4 before proceeding
+    validate_kernel_version_minimum(content)
+
+    result =
+      content
+      |> clean_content_for_nerves()
+      |> append_nerves_config_to_content()
+      |> append_lines(system_name_lines(app_name))
+      |> deduplicate_defconfig()
+
+    File.write!(target_path, result)
+  end
+
+  @doc """
   Cleans a defconfig file by removing Nerves-incompatible options.
   """
   def clean_defconfig_for_nerves(defconfig_path) do
     content = File.read!(defconfig_path)
+    File.write!(defconfig_path, clean_content_for_nerves(content))
+  end
 
-    cleaned_content =
-      content
-      |> String.split("\n")
-      |> Enum.reject(fn line ->
-        # Remove lines that conflict with Nerves
-        String.starts_with?(line, "BR2_TARGET_GENERIC_HOSTNAME=") or
+  @doc """
+  Appends Nerves-specific configuration to a defconfig file.
+  """
+  def append_nerves_config(defconfig_path) do
+    defconfig_content = File.read!(defconfig_path)
+
+    # Validate kernel version is >= 5.4 (Nerves toolchain headers baseline)
+    validate_kernel_version_minimum(defconfig_content)
+
+    result =
+      defconfig_content
+      |> append_nerves_config_to_content()
+      |> deduplicate_defconfig()
+
+    File.write!(defconfig_path, result)
+  end
+
+  @doc """
+  Appends Nerves system name to defconfig.
+  """
+  def append_nerves_system_name(defconfig_path, app_name) do
+    system_config = """
+
+    # Nerves system identification
+    BR2_TARGET_GENERIC_HOSTNAME="#{app_name}"
+    BR2_NERVES_SYSTEM_NAME="#{app_name}"
+    """
+
+    File.write!(defconfig_path, File.read!(defconfig_path) <> system_config)
+  end
+
+  @doc """
+  Copies and processes kernel defconfig from Buildroot to target directory.
+  """
+  def copy_kernel_defconfig(defconfig_path, buildroot_path, target_dir) do
+    initial_defconfig = File.read!(defconfig_path)
+
+    # Extract kernel version and validate against Buildroot support
+    kernel_version =
+      case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="([^"]+)"/, initial_defconfig) do
+        [_, version] ->
+          validated_version = validate_kernel_version_against_buildroot(version, buildroot_path)
+
+          if validated_version != version do
+            Mix.shell().info(
+              "⚠️ Kernel version #{version} not supported by this Buildroot version, using #{validated_version}"
+            )
+
+            # Update defconfig with the validated version
+            updated_defconfig =
+              String.replace(
+                initial_defconfig,
+                "BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=\"#{version}\"",
+                "BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=\"#{validated_version}\""
+              )
+
+            File.write!(defconfig_path, updated_defconfig)
+
+            Mix.shell().info(
+              "✅ Updated #{defconfig_path} with kernel version #{validated_version}"
+            )
+
+            validated_version
+          else
+            version
+          end
+
+        _ ->
+          # Check for custom Git repository version
+          case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="([^"]+)"/, initial_defconfig) do
+            [_, repo_version] ->
+              # Extract version from repo version string (e.g., "qcom-v6.16.7-unoq" -> "6.16.7")
+              case Regex.run(~r/v?([0-9]+\.[0-9]+\.[0-9]+)/, repo_version) do
+                [_, version] -> version
+                _ -> get_default_kernel_version_for_buildroot(buildroot_path)
+              end
+
+            _ ->
+              # Check for custom tarball
+              case Regex.run(
+                     ~r/BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="[^"]*linux-([^"\/]+)\.tar\.[^"]+"/,
+                     initial_defconfig
+                   ) do
+                [_, version] -> version
+                _ -> get_default_kernel_version_for_buildroot(buildroot_path)
+              end
+          end
+      end
+
+    # Re-read the defconfig after potential updates
+    defconfig = File.read!(defconfig_path)
+
+    target_kernel_defconfig = Path.join(target_dir, "linux-#{kernel_version}.defconfig")
+
+    # Handle custom tarball case
+    if String.contains?(defconfig, "BR2_LINUX_KERNEL_CUSTOM_TARBALL=y") do
+      Mix.shell().info("📦 Found custom kernel tarball configuration")
+      # Extract tarball URL if present
+      case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="([^"]+)"/, defconfig) do
+        [_, tarball_url] ->
+          Mix.shell().info("🔗 Custom kernel tarball: #{tarball_url}")
+
+        _ ->
+          Mix.shell().info("⚠️ Custom tarball specified but no URL found")
+      end
+    end
+
+    # First, check if there's a custom kernel configuration (Git repo, tarball, etc.)
+    cond do
+      String.contains?(defconfig, "BR2_LINUX_KERNEL_CUSTOM_GIT=y") ->
+        Mix.shell().info("📦 Found custom kernel Git repository configuration")
+        # Extract Git repo URL and version
+        repo_url =
+          case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_REPO_URL="([^"]+)"/, defconfig) do
+            [_, url] -> url
+            _ -> nil
+          end
+
+        repo_version =
+          case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="([^"]+)"/, defconfig) do
+            [_, version] -> version
+            _ -> nil
+          end
+
+        if repo_url && repo_version do
+          Mix.shell().info("🔗 Custom kernel Git repo: #{repo_url} (#{repo_version})")
+          # For custom Git repo, process as custom config
+          process_custom_kernel_config(
+            defconfig,
+            buildroot_path,
+            target_dir,
+            target_kernel_defconfig,
+            kernel_version
+          )
+        else
+          Mix.shell().info("⚠️ Custom Git repo specified but missing URL or version")
+
+          process_custom_kernel_config(
+            defconfig,
+            buildroot_path,
+            target_dir,
+            target_kernel_defconfig,
+            kernel_version
+          )
+        end
+
+        Mix.shell().info("✅ Kernel defconfig: #{target_kernel_defconfig}")
+
+      String.contains?(defconfig, "BR2_LINUX_KERNEL_CUSTOM_TARBALL=y") ->
+        Mix.shell().info("📦 Found custom kernel tarball configuration")
+        # Extract tarball URL if present
+        case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="([^"]+)"/, defconfig) do
+          [_, tarball_url] ->
+            Mix.shell().info("🔗 Custom kernel tarball: #{tarball_url}")
+            # For custom tarball, process as custom config
+            process_custom_kernel_config(
+              defconfig,
+              buildroot_path,
+              target_dir,
+              target_kernel_defconfig,
+              kernel_version
+            )
+
+          _ ->
+            Mix.shell().info("⚠️ Custom tarball specified but no URL found")
+
+            process_custom_kernel_config(
+              defconfig,
+              buildroot_path,
+              target_dir,
+              target_kernel_defconfig,
+              kernel_version
+            )
+        end
+
+        Mix.shell().info("✅ Kernel defconfig: #{target_kernel_defconfig}")
+
+      String.contains?(defconfig, "BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y") ->
+        Mix.shell().info(
+          "📋 Using BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y, downloading kernel sources"
+        )
+
+        # Determine architecture from defconfig
+        arch_name =
+          cond do
+            defconfig =~ "BR2_aarch64=y" -> "arm64"
+            defconfig =~ "BR2_arm=y" -> "arm"
+            defconfig =~ "BR2_x86_64=y" -> "x86"
+            defconfig =~ "BR2_i386=y" -> "x86"
+            defconfig =~ "BR2_riscv=y" -> "riscv"
+            defconfig =~ "BR2_mips=y" -> "mips"
+            defconfig =~ "BR2_powerpc=y" -> "powerpc"
+            # Default fallback
+            true -> "arm"
+          end
+
+        # Download kernel sources and extract defconfig
+        case download_and_extract_kernel_defconfig(
+               kernel_version,
+               arch_name,
+               target_kernel_defconfig
+             ) do
+          :ok ->
+            Mix.shell().info("✅ Successfully extracted kernel defconfig for #{arch_name}")
+            add_nerves_kernel_configs(target_kernel_defconfig)
+            # Update the nerves_defconfig to use the custom config file instead of arch default
+            update_nerves_defconfig_for_custom_kernel(
+              Path.join(target_dir, "nerves_defconfig"),
+              kernel_version
+            )
+
+          :error ->
+            Mix.shell().info("⚠️ Failed to download kernel sources, cannot continue")
+        end
+
+        Mix.shell().info("✅ Kernel defconfig: #{target_kernel_defconfig}")
+
+      true ->
+        # Standard logic for custom config files
+        process_custom_kernel_config(
+          defconfig,
+          buildroot_path,
+          target_dir,
+          target_kernel_defconfig,
+          kernel_version
+        )
+
+        Mix.shell().info("✅ Kernel defconfig: #{target_kernel_defconfig}")
+    end
+  end
+
+  @doc """
+  Copies U-Boot configuration fragments from Buildroot to the Nerves system directory
+  and updates the nerves_defconfig to use NERVES_DEFCONFIG_DIR paths.
+  """
+  def copy_uboot_fragments(defconfig_path, buildroot_path, target_dir) do
+    defconfig = File.read!(defconfig_path)
+
+    # Look for U-Boot config fragment files
+    case Regex.run(~r/BR2_TARGET_UBOOT_CONFIG_FRAGMENT_FILES="([^"]+)"/, defconfig) do
+      [_, fragment_files] ->
+        Mix.shell().info("📋 Found U-Boot config fragments: #{fragment_files}")
+
+        # Create uboot directory in the target system
+        uboot_dir = Path.join(target_dir, "uboot")
+        File.mkdir_p!(uboot_dir)
+
+        # Process each fragment file (can be space-separated)
+        fragments = String.split(fragment_files, " ", trim: true)
+
+        copied_fragments =
+          Enum.reduce(fragments, [], fn fragment, acc ->
+            source_path = Path.join(buildroot_path, fragment)
+            fragment_name = Path.basename(fragment)
+            target_path = Path.join(uboot_dir, fragment_name)
+
+            if File.exists?(source_path) do
+              File.cp!(source_path, target_path)
+              Mix.shell().info("📄 Copied U-Boot fragment: #{fragment} -> uboot/#{fragment_name}")
+              acc ++ ["${NERVES_DEFCONFIG_DIR}/uboot/#{fragment_name}"]
+            else
+              Mix.shell().info("⚠️ U-Boot fragment not found: #{source_path}")
+              acc
+            end
+          end)
+
+        # Update the nerves_defconfig to use NERVES_DEFCONFIG_DIR paths
+        if length(copied_fragments) > 0 do
+          new_fragment_line =
+            "BR2_TARGET_UBOOT_CONFIG_FRAGMENT_FILES=\"#{Enum.join(copied_fragments, " ")}\""
+
+          updated_defconfig =
+            String.replace(
+              defconfig,
+              ~r/BR2_TARGET_UBOOT_CONFIG_FRAGMENT_FILES="[^"]*"/,
+              new_fragment_line
+            )
+
+          File.write!(defconfig_path, updated_defconfig)
+
+          Mix.shell().info(
+            "✅ Updated nerves_defconfig with NERVES_DEFCONFIG_DIR paths for U-Boot fragments"
+          )
+        end
+
+      _ ->
+        Mix.shell().info("ℹ️ No U-Boot config fragments found in defconfig")
+    end
+  end
+
+  defp process_custom_kernel_config(
+         defconfig,
+         buildroot_path,
+         target_dir,
+         target_kernel_defconfig,
+         kernel_version
+       ) do
+    cond do
+      # First check for custom Git repository configuration
+      String.contains?(defconfig, "BR2_LINUX_KERNEL_CUSTOM_GIT=y") ->
+        repo_url =
+          case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_REPO_URL="([^"]+)"/, defconfig) do
+            [_, url] -> url
+            _ -> nil
+          end
+
+        repo_version =
+          case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="([^"]+)"/, defconfig) do
+            [_, version] -> version
+            _ -> nil
+          end
+
+        if repo_url && repo_version do
+          Mix.shell().info("🔗 Using custom kernel Git repository: #{repo_url} (#{repo_version})")
+          # Extract kernel version from repo version if possible, otherwise use provided version
+          extracted_version =
+            case Regex.run(~r/v?([0-9]+\.[0-9]+\.[0-9]+)/, repo_version) do
+              [_, version] -> version
+              _ -> kernel_version
+            end
+
+          # Clone the custom kernel repository and extract the appropriate defconfig
+          case clone_and_extract_kernel_defconfig(
+                 repo_url,
+                 repo_version,
+                 defconfig,
+                 target_kernel_defconfig,
+                 extracted_version
+               ) do
+            :ok ->
+              Mix.shell().info("✅ Successfully extracted kernel defconfig from custom repository")
+              # Update the nerves_defconfig to use the custom config file instead of other options
+              update_nerves_defconfig_for_custom_kernel(
+                Path.join(target_dir, "nerves_defconfig"),
+                extracted_version
+              )
+
+            :error ->
+              Mix.shell().info(
+                "⚠️ Failed to extract from custom repository, creating fallback config"
+              )
+
+              arch = determine_kernel_arch_from_defconfig(defconfig)
+              create_minimal_kernel_config(target_kernel_defconfig, extracted_version, arch)
+              # Still update nerves_defconfig even with fallback
+              update_nerves_defconfig_for_custom_kernel(
+                Path.join(target_dir, "nerves_defconfig"),
+                extracted_version
+              )
+          end
+        else
+          Mix.shell().info("⚠️ Custom Git repo specified but missing URL or version")
+          arch = determine_kernel_arch_from_defconfig(defconfig)
+          create_minimal_kernel_config(target_kernel_defconfig, kernel_version, arch)
+        end
+
+      # Check for custom tarball configuration
+      String.contains?(defconfig, "BR2_LINUX_KERNEL_CUSTOM_TARBALL=y") ->
+        case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="([^"]+)"/, defconfig) do
+          [_, tarball_url] ->
+            Mix.shell().info("🔗 Using custom kernel tarball: #{tarball_url}")
+            # Extract kernel version from URL if possible
+            extracted_version =
+              case Regex.run(~r/linux-([0-9]+\.[0-9]+\.[0-9]+)/, tarball_url) do
+                [_, version] -> version
+                _ -> kernel_version
+              end
+
+            # For custom kernel tarballs, we create a minimal defconfig
+            # since the exact config will depend on the custom kernel
+            arch = determine_kernel_arch_from_defconfig(defconfig)
+            create_minimal_kernel_config(target_kernel_defconfig, extracted_version, arch)
+
+          _ ->
+            Mix.shell().info("⚠️ Custom tarball specified but no URL found")
+            arch = determine_kernel_arch_from_defconfig(defconfig)
+            create_minimal_kernel_config(target_kernel_defconfig, kernel_version, arch)
+        end
+
+      # Standard custom config file processing
+      true ->
+        process_standard_custom_config(
+          defconfig,
+          buildroot_path,
+          target_dir,
+          target_kernel_defconfig,
+          kernel_version
+        )
+    end
+  end
+
+  defp process_standard_custom_config(
+         defconfig,
+         buildroot_path,
+         target_dir,
+         target_kernel_defconfig,
+         kernel_version
+       ) do
+    # Standard custom config file processing
+    kernel_defconfig =
+      case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="([^"]+)"/, defconfig) do
+        [_, config_file_path] ->
+          # The path is relative to buildroot directory
+          absolute_path = Path.join(buildroot_path, config_file_path)
+          Mix.shell().info("📋 Found BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE: #{config_file_path}")
+
+          if File.exists?(absolute_path) do
+            absolute_path
+          else
+            Mix.shell().info("⚠️ Specified kernel config file does not exist: #{absolute_path}")
+            nil
+          end
+
+        _ ->
+          Mix.shell().info(
+            "🔍 No BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE found, searching for kernel defconfig..."
+          )
+
+          # Try to extract board name from defconfig path for smarter search
+          board_name =
+            case Path.basename(target_dir) do
+              "nerves_system_" <> board -> board
+              board -> board
+            end
+
+          # Fallback to searching for kernel defconfig with platform-specific priority
+          kernel_defconfig_candidates = [
+            # First try board-specific kernel configs
+            Path.join([buildroot_path, "board", "**", "#{board_name}", "linux*.config"]),
+            Path.join([buildroot_path, "board", "**", "*#{board_name}*", "linux*.config"]),
+            Path.join([buildroot_path, "board", "**", "linux-#{kernel_version}.config"]),
+            # Then try generic patterns but filter by relevance
+            Path.join([buildroot_path, "board", "**", "linux*.config"]),
+            Path.join([buildroot_path, "configs", "**", "linux*.config"]),
+            # Last resort: any defconfig, but we'll filter it
+            Path.join([buildroot_path, "**", "linux-#{kernel_version}.defconfig"])
+          ]
+
+          found_configs =
+            kernel_defconfig_candidates
+            |> Enum.flat_map(&Path.wildcard/1)
+            |> Enum.filter(&File.exists?/1)
+
+          # Prioritize configs that match the board name
+          prioritized_config =
+            found_configs
+            |> Enum.find(fn path ->
+              path_lower = String.downcase(path)
+              board_lower = String.downcase(board_name)
+              String.contains?(path_lower, board_lower)
+            end)
+
+          case prioritized_config do
+            nil ->
+              # If no board-specific config found, take the first one but warn
+              case found_configs do
+                [first_config | _] ->
+                  Mix.shell().info(
+                    "⚠️ No board-specific kernel config found for #{board_name}, using: #{first_config}"
+                  )
+
+                  first_config
+
+                [] ->
+                  Mix.shell().info("⚠️ No kernel config files found")
+                  nil
+              end
+
+            config ->
+              Mix.shell().info("✅ Found board-specific kernel config: #{config}")
+              config
+          end
+      end
+
+    case kernel_defconfig do
+      nil ->
+        Mix.shell().info("⚠️ No kernel defconfig found, creating minimal config")
+        arch = determine_kernel_arch_from_defconfig(defconfig)
+        create_minimal_kernel_config(target_kernel_defconfig, kernel_version, arch)
+        # Update nerves_defconfig to point to the created kernel config file
+        update_nerves_defconfig_for_custom_kernel(
+          Path.join(target_dir, "nerves_defconfig"),
+          kernel_version
+        )
+
+      config_path ->
+        Mix.shell().info("📋 Copying kernel defconfig from #{config_path}")
+        File.cp!(config_path, target_kernel_defconfig)
+        add_nerves_kernel_configs(target_kernel_defconfig)
+        # Update nerves_defconfig to point to the copied kernel config file
+        update_nerves_defconfig_for_custom_kernel(
+          Path.join(target_dir, "nerves_defconfig"),
+          kernel_version
+        )
+    end
+  end
+
+  defp get_toolchain_prefix(defconfig) do
+    cond do
+      defconfig =~ "BR2_aarch64=y" ->
+        "aarch64-nerves-linux-gnu"
+
+      defconfig =~ "BR2_arm=y" ->
+        "arm-nerves-linux-gnueabihf"
+
+      defconfig =~ "BR2_x86_64=y" ->
+        "x86_64-nerves-linux-musl"
+
+      defconfig =~ "BR2_riscv=y" ->
+        "riscv64-nerves-linux-gnu"
+
+      true ->
+        # Default fallback
+        "arm-nerves-linux-gnueabihf"
+    end
+  end
+
+  # Returns the C library config line. Nerves exclusively uses glibc.
+  # For x86_64 (musl-based toolchain), emit a warning but allow it.
+  defp get_c_library_config(toolchain_prefix) do
+    if String.contains?(toolchain_prefix, "musl") do
+      Mix.shell().info(
+        "WARNING: This toolchain uses musl instead of glibc. " <>
+          "Nerves officially supports glibc only. Some packages may not work correctly."
+      )
+
+      "BR2_TOOLCHAIN_EXTERNAL_CUSTOM_MUSL=y"
+    else
+      "BR2_TOOLCHAIN_EXTERNAL_CUSTOM_GLIBC=y"
+    end
+  end
+
+  # Removes Nerves-incompatible options from defconfig content.
+  # Returns the cleaned content string.
+  defp clean_content_for_nerves(content) do
+    content
+    |> String.split("\n")
+    |> Enum.reject(fn line ->
+      String.starts_with?(line, "BR2_TARGET_GENERIC_HOSTNAME=") or
         String.starts_with?(line, "BR2_TARGET_GENERIC_ISSUE=") or
         String.starts_with?(line, "BR2_TARGET_GENERIC_PASSWD_SHA256=") or
         String.starts_with?(line, "BR2_SYSTEM_DHCP=") or
@@ -39,20 +597,20 @@ defmodule NervesBootstrap.DefconfigProcessor do
         String.starts_with?(line, "BR2_ROOTFS_POST_BUILD_SCRIPT=") or
         String.starts_with?(line, "BR2_ROOTFS_POST_IMAGE_SCRIPT=") or
         String.starts_with?(line, "BR2_ROOTFS_POST_SCRIPT_ARGS=")
-      end)
-      |> Enum.join("\n")
-
-    File.write!(defconfig_path, cleaned_content)
+    end)
+    |> Enum.join("\n")
   end
 
-  @doc """
-  Appends Nerves-specific configuration to a defconfig file.
-  """
-  def append_nerves_config(defconfig_path) do
-    # Get toolchain information for this defconfig
-    defconfig_content = File.read!(defconfig_path)
-    {toolchain_name, version} = NervesBootstrap.PlatformDetector.infer_toolchain_from_content(defconfig_content)
+  # Appends Nerves-specific Buildroot configuration to content string.
+  # Resolves toolchain URL and generates all required config lines.
+  defp append_nerves_config_to_content(content) do
+    {toolchain_name, version} =
+      NervesBootstrap.PlatformDetector.infer_toolchain_from_content(content)
+
     toolchain_url = NervesBootstrap.ToolchainResolver.get_toolchain_url(toolchain_name, version)
+    toolchain_prefix = get_toolchain_prefix(content)
+    gcc_version_config = get_gcc_version_config(toolchain_url)
+    c_lib_config = get_c_library_config(toolchain_prefix)
 
     nerves_config = """
 
@@ -61,10 +619,10 @@ defmodule NervesBootstrap.DefconfigProcessor do
     BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y
     BR2_TOOLCHAIN_EXTERNAL_DOWNLOAD=y
     BR2_TOOLCHAIN_EXTERNAL_URL="#{toolchain_url}"
-    BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX="#{get_toolchain_prefix(defconfig_content)}"
-    #{get_gcc_version_config(toolchain_url)}
+    BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX="#{toolchain_prefix}"
+    #{gcc_version_config}
     BR2_TOOLCHAIN_EXTERNAL_HEADERS_5_4=y
-    BR2_TOOLCHAIN_EXTERNAL_CUSTOM_GLIBC=y
+    #{c_lib_config}
     # BR2_TOOLCHAIN_EXTERNAL_INET_RPC is not set
     BR2_TOOLCHAIN_EXTERNAL_CXX=y
     BR2_TOOLCHAIN_EXTERNAL_FORTRAN=y
@@ -129,374 +687,74 @@ defmodule NervesBootstrap.DefconfigProcessor do
     BR2_LINUX_KERNEL_PATCH="${NERVES_DEFCONFIG_DIR}/linux"
     """
 
-    File.write!(defconfig_path, File.read!(defconfig_path) <> nerves_config)
+    content <> nerves_config
   end
 
-  @doc """
-  Appends external tree reference to defconfig.
-  """
-  def append_external_reference(defconfig_path, buildroot_path) do
-    external_config = """
-
-    # External tree reference
-    BR2_EXTERNAL="#{buildroot_path}"
+  defp system_name_lines(app_name) do
     """
-
-    File.write!(defconfig_path, File.read!(defconfig_path) <> external_config)
-  end
-
-  @doc """
-  Appends Nerves system name to defconfig.
-  """
-  def append_nerves_system_name(defconfig_path, app_name) do
-    system_config = """
 
     # Nerves system identification
     BR2_TARGET_GENERIC_HOSTNAME="#{app_name}"
     BR2_NERVES_SYSTEM_NAME="#{app_name}"
     """
-
-    File.write!(defconfig_path, File.read!(defconfig_path) <> system_config)
   end
 
-  @doc """
-  Copies and processes kernel defconfig from Buildroot to target directory.
-  """
-  def copy_kernel_defconfig(defconfig_path, buildroot_path, target_dir) do
-    initial_defconfig = File.read!(defconfig_path)
+  defp append_lines(content, lines), do: content <> lines
 
-    # Extract kernel version and validate against Buildroot support
-    kernel_version = case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="([^"]+)"/, initial_defconfig) do
-      [_, version] ->
-        validated_version = validate_kernel_version_against_buildroot(version, buildroot_path)
-        if validated_version != version do
-          Mix.shell().info("⚠️ Kernel version #{version} not supported by this Buildroot version, using #{validated_version}")
-          # Update defconfig with the validated version
-          updated_defconfig = String.replace(initial_defconfig,
-            "BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=\"#{version}\"",
-            "BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=\"#{validated_version}\""
-          )
-          File.write!(defconfig_path, updated_defconfig)
-          Mix.shell().info("✅ Updated #{defconfig_path} with kernel version #{validated_version}")
-          validated_version
-        else
-          version
-        end
-      _ ->
-        # Check for custom Git repository version
-        case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="([^"]+)"/, initial_defconfig) do
-          [_, repo_version] ->
-            # Extract version from repo version string (e.g., "qcom-v6.16.7-unoq" -> "6.16.7")
-            case Regex.run(~r/v?([0-9]+\.[0-9]+\.[0-9]+)/, repo_version) do
-              [_, version] -> version
-              _ -> get_default_kernel_version_for_buildroot(buildroot_path)
-            end
-          _ ->
-            # Check for custom tarball
-            case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="[^"]*linux-([^"\/]+)\.tar\.[^"]+"/, initial_defconfig) do
-              [_, version] -> version
-              _ -> get_default_kernel_version_for_buildroot(buildroot_path)
-            end
-        end
-    end
+  # Validates that the kernel version in the defconfig is >= 5.4.
+  # Nerves toolchains use BR2_TOOLCHAIN_EXTERNAL_HEADERS_5_4 as a fixed baseline,
+  # so kernels older than 5.4 are incompatible.
+  defp validate_kernel_version_minimum(defconfig_content) do
+    kernel_version = extract_kernel_version_from_content(defconfig_content)
 
-    # Re-read the defconfig after potential updates
-    defconfig = File.read!(defconfig_path)
-
-    target_kernel_defconfig = Path.join(target_dir, "linux-#{kernel_version}.defconfig")
-
-    # Handle custom tarball case
-    if String.contains?(defconfig, "BR2_LINUX_KERNEL_CUSTOM_TARBALL=y") do
-      Mix.shell().info("📦 Found custom kernel tarball configuration")
-      # Extract tarball URL if present
-      case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="([^"]+)"/, defconfig) do
-        [_, tarball_url] ->
-          Mix.shell().info("🔗 Custom kernel tarball: #{tarball_url}")
-        _ ->
-          Mix.shell().info("⚠️ Custom tarball specified but no URL found")
-      end
-    end
-
-    # First, check if there's a custom kernel configuration (Git repo, tarball, etc.)
-    cond do
-      String.contains?(defconfig, "BR2_LINUX_KERNEL_CUSTOM_GIT=y") ->
-        Mix.shell().info("📦 Found custom kernel Git repository configuration")
-        # Extract Git repo URL and version
-        repo_url = case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_REPO_URL="([^"]+)"/, defconfig) do
-          [_, url] -> url
-          _ -> nil
-        end
-
-        repo_version = case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="([^"]+)"/, defconfig) do
-          [_, version] -> version
-          _ -> nil
-        end
-
-        if repo_url && repo_version do
-          Mix.shell().info("🔗 Custom kernel Git repo: #{repo_url} (#{repo_version})")
-          # For custom Git repo, process as custom config
-          process_custom_kernel_config(defconfig, buildroot_path, target_dir, target_kernel_defconfig, kernel_version)
-        else
-          Mix.shell().info("⚠️ Custom Git repo specified but missing URL or version")
-          process_custom_kernel_config(defconfig, buildroot_path, target_dir, target_kernel_defconfig, kernel_version)
-        end
-        Mix.shell().info("✅ Kernel defconfig: #{target_kernel_defconfig}")
-
-      String.contains?(defconfig, "BR2_LINUX_KERNEL_CUSTOM_TARBALL=y") ->
-        Mix.shell().info("📦 Found custom kernel tarball configuration")
-        # Extract tarball URL if present
-        case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="([^"]+)"/, defconfig) do
-          [_, tarball_url] ->
-            Mix.shell().info("🔗 Custom kernel tarball: #{tarball_url}")
-            # For custom tarball, process as custom config
-            process_custom_kernel_config(defconfig, buildroot_path, target_dir, target_kernel_defconfig, kernel_version)
-          _ ->
-            Mix.shell().info("⚠️ Custom tarball specified but no URL found")
-            process_custom_kernel_config(defconfig, buildroot_path, target_dir, target_kernel_defconfig, kernel_version)
-        end
-        Mix.shell().info("✅ Kernel defconfig: #{target_kernel_defconfig}")
-
-      String.contains?(defconfig, "BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y") ->
-        Mix.shell().info("📋 Using BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y, downloading kernel sources")
-
-        # Determine architecture from defconfig
-        arch_name = cond do
-          defconfig =~ "BR2_aarch64=y" -> "arm64"
-          defconfig =~ "BR2_arm=y" -> "arm"
-          defconfig =~ "BR2_x86_64=y" -> "x86"
-          defconfig =~ "BR2_i386=y" -> "x86"
-          defconfig =~ "BR2_riscv=y" -> "riscv"
-          defconfig =~ "BR2_mips=y" -> "mips"
-          defconfig =~ "BR2_powerpc=y" -> "powerpc"
-          true -> "arm"  # Default fallback
-        end
-
-        # Download kernel sources and extract defconfig
-        case download_and_extract_kernel_defconfig(kernel_version, arch_name, target_kernel_defconfig) do
-          :ok ->
-            Mix.shell().info("✅ Successfully extracted kernel defconfig for #{arch_name}")
-            add_nerves_kernel_configs(target_kernel_defconfig)
-            # Update the nerves_defconfig to use the custom config file instead of arch default
-            update_nerves_defconfig_for_custom_kernel(Path.join(target_dir, "nerves_defconfig"), kernel_version)
-          :error ->
-            Mix.shell().info("⚠️ Failed to download kernel sources, cannot continue")
-        end
-
-        Mix.shell().info("✅ Kernel defconfig: #{target_kernel_defconfig}")
-
-      true ->
-        # Standard logic for custom config files
-        process_custom_kernel_config(defconfig, buildroot_path, target_dir, target_kernel_defconfig, kernel_version)
-        Mix.shell().info("✅ Kernel defconfig: #{target_kernel_defconfig}")
-    end
-  end
-
-  @doc """
-  Copies U-Boot configuration fragments from Buildroot to the Nerves system directory
-  and updates the nerves_defconfig to use NERVES_DEFCONFIG_DIR paths.
-  """
-  def copy_uboot_fragments(defconfig_path, buildroot_path, target_dir) do
-    defconfig = File.read!(defconfig_path)
-
-    # Look for U-Boot config fragment files
-    case Regex.run(~r/BR2_TARGET_UBOOT_CONFIG_FRAGMENT_FILES="([^"]+)"/, defconfig) do
-      [_, fragment_files] ->
-        Mix.shell().info("📋 Found U-Boot config fragments: #{fragment_files}")
-
-        # Create uboot directory in the target system
-        uboot_dir = Path.join(target_dir, "uboot")
-        File.mkdir_p!(uboot_dir)
-
-        # Process each fragment file (can be space-separated)
-        fragments = String.split(fragment_files, " ", trim: true)
-
-        copied_fragments = Enum.reduce(fragments, [], fn fragment, acc ->
-          source_path = Path.join(buildroot_path, fragment)
-          fragment_name = Path.basename(fragment)
-          target_path = Path.join(uboot_dir, fragment_name)
-
-          if File.exists?(source_path) do
-            File.cp!(source_path, target_path)
-            Mix.shell().info("📄 Copied U-Boot fragment: #{fragment} -> uboot/#{fragment_name}")
-            acc ++ ["${NERVES_DEFCONFIG_DIR}/uboot/#{fragment_name}"]
-          else
-            Mix.shell().info("⚠️ U-Boot fragment not found: #{source_path}")
-            acc
-          end
-        end)
-
-        # Update the nerves_defconfig to use NERVES_DEFCONFIG_DIR paths
-        if length(copied_fragments) > 0 do
-          new_fragment_line = "BR2_TARGET_UBOOT_CONFIG_FRAGMENT_FILES=\"#{Enum.join(copied_fragments, " ")}\""
-          updated_defconfig = String.replace(defconfig,
-            ~r/BR2_TARGET_UBOOT_CONFIG_FRAGMENT_FILES="[^"]*"/,
-            new_fragment_line
-          )
-          File.write!(defconfig_path, updated_defconfig)
-          Mix.shell().info("✅ Updated nerves_defconfig with NERVES_DEFCONFIG_DIR paths for U-Boot fragments")
-        end
-
-      _ ->
-        Mix.shell().info("ℹ️ No U-Boot config fragments found in defconfig")
-    end
-  end
-
-  defp process_custom_kernel_config(defconfig, buildroot_path, target_dir, target_kernel_defconfig, kernel_version) do
-    cond do
-      # First check for custom Git repository configuration
-      String.contains?(defconfig, "BR2_LINUX_KERNEL_CUSTOM_GIT=y") ->
-        repo_url = case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_REPO_URL="([^"]+)"/, defconfig) do
-          [_, url] -> url
-          _ -> nil
-        end
-
-        repo_version = case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="([^"]+)"/, defconfig) do
-          [_, version] -> version
-          _ -> nil
-        end
-
-        if repo_url && repo_version do
-          Mix.shell().info("🔗 Using custom kernel Git repository: #{repo_url} (#{repo_version})")
-          # Extract kernel version from repo version if possible, otherwise use provided version
-          extracted_version = case Regex.run(~r/v?([0-9]+\.[0-9]+\.[0-9]+)/, repo_version) do
-            [_, version] -> version
-            _ -> kernel_version
-          end
-
-          # Clone the custom kernel repository and extract the appropriate defconfig
-          case clone_and_extract_kernel_defconfig(repo_url, repo_version, defconfig, target_kernel_defconfig, extracted_version) do
-            :ok ->
-              Mix.shell().info("✅ Successfully extracted kernel defconfig from custom repository")
-              # Update the nerves_defconfig to use the custom config file instead of other options
-              update_nerves_defconfig_for_custom_kernel(Path.join(target_dir, "nerves_defconfig"), extracted_version)
-            :error ->
-              Mix.shell().info("⚠️ Failed to extract from custom repository, creating fallback config")
-              create_minimal_kernel_config(target_kernel_defconfig, extracted_version)
-              # Still update nerves_defconfig even with fallback
-              update_nerves_defconfig_for_custom_kernel(Path.join(target_dir, "nerves_defconfig"), extracted_version)
-          end
-        else
-          Mix.shell().info("⚠️ Custom Git repo specified but missing URL or version")
-          create_minimal_kernel_config(target_kernel_defconfig, kernel_version)
-        end
-
-      # Check for custom tarball configuration
-      String.contains?(defconfig, "BR2_LINUX_KERNEL_CUSTOM_TARBALL=y") ->
-        case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="([^"]+)"/, defconfig) do
-          [_, tarball_url] ->
-            Mix.shell().info("🔗 Using custom kernel tarball: #{tarball_url}")
-            # Extract kernel version from URL if possible
-            extracted_version = case Regex.run(~r/linux-([0-9]+\.[0-9]+\.[0-9]+)/, tarball_url) do
-              [_, version] -> version
-              _ -> kernel_version
-            end
-
-            # For custom kernel tarballs, we create a minimal defconfig
-            # since the exact config will depend on the custom kernel
-            create_minimal_kernel_config(target_kernel_defconfig, extracted_version)
-          _ ->
-            Mix.shell().info("⚠️ Custom tarball specified but no URL found")
-            create_minimal_kernel_config(target_kernel_defconfig, kernel_version)
-        end
-
-      # Standard custom config file processing
-      true ->
-        process_standard_custom_config(defconfig, buildroot_path, target_dir, target_kernel_defconfig, kernel_version)
-    end
-  end
-
-  defp process_standard_custom_config(defconfig, buildroot_path, target_dir, target_kernel_defconfig, kernel_version) do
-    # Standard custom config file processing
-    kernel_defconfig = case Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="([^"]+)"/, defconfig) do
-      [_, config_file_path] ->
-        # The path is relative to buildroot directory
-        absolute_path = Path.join(buildroot_path, config_file_path)
-        Mix.shell().info("📋 Found BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE: #{config_file_path}")
-        if File.exists?(absolute_path) do
-          absolute_path
-        else
-          Mix.shell().info("⚠️ Specified kernel config file does not exist: #{absolute_path}")
-          nil
-        end
-      _ ->
-        Mix.shell().info("🔍 No BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE found, searching for kernel defconfig...")
-
-        # Try to extract board name from defconfig path for smarter search
-        board_name = case Path.basename(target_dir) do
-          "nerves_system_" <> board -> board
-          board -> board
-        end
-
-        # Fallback to searching for kernel defconfig with platform-specific priority
-        kernel_defconfig_candidates = [
-          # First try board-specific kernel configs
-          Path.join([buildroot_path, "board", "**", "#{board_name}", "linux*.config"]),
-          Path.join([buildroot_path, "board", "**", "*#{board_name}*", "linux*.config"]),
-          Path.join([buildroot_path, "board", "**", "linux-#{kernel_version}.config"]),
-          # Then try generic patterns but filter by relevance
-          Path.join([buildroot_path, "board", "**", "linux*.config"]),
-          Path.join([buildroot_path, "configs", "**", "linux*.config"]),
-          # Last resort: any defconfig, but we'll filter it
-          Path.join([buildroot_path, "**", "linux-#{kernel_version}.defconfig"])
-        ]
-
-        found_configs = kernel_defconfig_candidates
-        |> Enum.flat_map(&Path.wildcard/1)
-        |> Enum.filter(&File.exists?/1)
-
-        # Prioritize configs that match the board name
-        prioritized_config = found_configs
-        |> Enum.find(fn path ->
-          path_lower = String.downcase(path)
-          board_lower = String.downcase(board_name)
-          String.contains?(path_lower, board_lower)
-        end)
-
-        case prioritized_config do
-          nil ->
-            # If no board-specific config found, take the first one but warn
-            case found_configs do
-              [first_config | _] ->
-                Mix.shell().info("⚠️ No board-specific kernel config found for #{board_name}, using: #{first_config}")
-                first_config
-              [] ->
-                Mix.shell().info("⚠️ No kernel config files found")
-                nil
-            end
-          config ->
-            Mix.shell().info("✅ Found board-specific kernel config: #{config}")
-            config
-        end
-    end
-
-    case kernel_defconfig do
+    case kernel_version do
       nil ->
-        Mix.shell().info("⚠️ No kernel defconfig found, creating minimal config")
-        create_minimal_kernel_config(target_kernel_defconfig, kernel_version)
-        # Update nerves_defconfig to point to the created kernel config file
-        update_nerves_defconfig_for_custom_kernel(Path.join(target_dir, "nerves_defconfig"), kernel_version)
+        # No explicit kernel version found; can't validate, proceed
+        :ok
 
-      config_path ->
-        Mix.shell().info("📋 Copying kernel defconfig from #{config_path}")
-        File.cp!(config_path, target_kernel_defconfig)
-        add_nerves_kernel_configs(target_kernel_defconfig)
-        # Update nerves_defconfig to point to the copied kernel config file
-        update_nerves_defconfig_for_custom_kernel(Path.join(target_dir, "nerves_defconfig"), kernel_version)
+      version ->
+        case version_to_sortable(version) do
+          sortable when sortable < {5, 4, 0} ->
+            Mix.raise("""
+            Kernel version #{version} is too old for Nerves.
+
+            Nerves toolchains require kernel headers >= 5.4 \
+            (BR2_TOOLCHAIN_EXTERNAL_HEADERS_5_4). Kernels older than 5.4 are \
+            incompatible with the Nerves toolchain.
+
+            Please update your defconfig to use a kernel >= 5.4.
+            """)
+
+          _ ->
+            :ok
+        end
     end
   end
 
-  defp get_toolchain_prefix(defconfig) do
+  # Extracts a kernel version string from defconfig content by checking
+  # multiple possible Buildroot kernel version settings.
+  defp extract_kernel_version_from_content(content) do
     cond do
-      defconfig =~ "BR2_aarch64=y" ->
-        "aarch64-nerves-linux-gnu"
-      defconfig =~ "BR2_arm=y" ->
-        "arm-nerves-linux-gnueabihf"
-      defconfig =~ "BR2_x86_64=y" ->
-        "x86_64-nerves-linux-musl"
-      defconfig =~ "BR2_riscv=y" ->
-        "riscv64-nerves-linux-gnu"
+      match = Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="([^"]+)"/, content) ->
+        Enum.at(match, 1)
+
+      match = Regex.run(~r/BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="([^"]+)"/, content) ->
+        repo_version = Enum.at(match, 1)
+
+        case Regex.run(~r/v?([0-9]+\.[0-9]+\.[0-9]+)/, repo_version) do
+          [_, version] -> version
+          _ -> nil
+        end
+
+      match =
+          Regex.run(
+            ~r/BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="[^"]*linux-([0-9]+\.[0-9]+\.[0-9]+)\.tar\.[^"]+"/,
+            content
+          ) ->
+        Enum.at(match, 1)
+
       true ->
-        "arm-nerves-linux-gnueabihf"  # Default fallback
+        nil
     end
   end
 
@@ -506,17 +764,31 @@ defmodule NervesBootstrap.DefconfigProcessor do
     case Regex.run(~r/v(\d+)\.(\d+)\./, toolchain_url) do
       [_, major, _minor] ->
         case major do
-          "13" -> "BR2_TOOLCHAIN_EXTERNAL_GCC_13=y"
-          "14" -> "BR2_TOOLCHAIN_EXTERNAL_GCC_14=y"
-          "15" -> "BR2_TOOLCHAIN_EXTERNAL_GCC_15=y"
-          "12" -> "BR2_TOOLCHAIN_EXTERNAL_GCC_12=y"
-          "11" -> "BR2_TOOLCHAIN_EXTERNAL_GCC_11=y"
+          "13" ->
+            "BR2_TOOLCHAIN_EXTERNAL_GCC_13=y"
+
+          "14" ->
+            "BR2_TOOLCHAIN_EXTERNAL_GCC_14=y"
+
+          "15" ->
+            "BR2_TOOLCHAIN_EXTERNAL_GCC_15=y"
+
+          "12" ->
+            "BR2_TOOLCHAIN_EXTERNAL_GCC_12=y"
+
+          "11" ->
+            "BR2_TOOLCHAIN_EXTERNAL_GCC_11=y"
+
           _ ->
             Mix.shell().info("⚠️ Unknown GCC version #{major}, defaulting to GCC 14")
             "BR2_TOOLCHAIN_EXTERNAL_GCC_14=y"
         end
+
       _ ->
-        Mix.shell().info("⚠️ Could not extract GCC version from URL: #{toolchain_url}, defaulting to GCC 14")
+        Mix.shell().info(
+          "⚠️ Could not extract GCC version from URL: #{toolchain_url}, defaulting to GCC 14"
+        )
+
         "BR2_TOOLCHAIN_EXTERNAL_GCC_14=y"
     end
   end
@@ -544,7 +816,9 @@ defmodule NervesBootstrap.DefconfigProcessor do
 
     try do
       # Download kernel tarball
-      kernel_url = "https://cdn.kernel.org/pub/linux/kernel/v#{String.slice(kernel_version, 0, 1)}.x/linux-#{kernel_version}.tar.xz"
+      kernel_url =
+        "https://cdn.kernel.org/pub/linux/kernel/v#{String.slice(kernel_version, 0, 1)}.x/linux-#{kernel_version}.tar.xz"
+
       tarball_path = Path.join(temp_dir, "linux-#{kernel_version}.tar.xz")
 
       Mix.shell().info("📥 Downloading kernel #{kernel_version} from #{kernel_url}")
@@ -562,10 +836,12 @@ defmodule NervesBootstrap.DefconfigProcessor do
               File.cp!(extracted_defconfig, target_path)
               Mix.shell().info("✅ Extracted and copied kernel defconfig")
               :ok
+
             :error ->
               Mix.shell().info("❌ Failed to extract defconfig from tarball")
               :error
           end
+
         :error ->
           Mix.shell().info("❌ Failed to download kernel tarball")
           :error
@@ -580,7 +856,9 @@ defmodule NervesBootstrap.DefconfigProcessor do
 
   defp download_file(url, destination) do
     case System.cmd("curl", ["-L", "-o", destination, url], stderr_to_stdout: true) do
-      {_, 0} -> :ok
+      {_, 0} ->
+        :ok
+
       {output, _} ->
         Mix.shell().info("❌ curl failed: #{output}")
         :error
@@ -590,14 +868,18 @@ defmodule NervesBootstrap.DefconfigProcessor do
   defp extract_defconfig_from_tarball(tarball_path, defconfig_path_in_tar, extract_dir) do
     File.mkdir_p!(extract_dir)
 
-    case System.cmd("tar", ["-xf", tarball_path, "-C", extract_dir, defconfig_path_in_tar], stderr_to_stdout: true) do
+    case System.cmd("tar", ["-xf", tarball_path, "-C", extract_dir, defconfig_path_in_tar],
+           stderr_to_stdout: true
+         ) do
       {_, 0} ->
         extracted_path = Path.join(extract_dir, defconfig_path_in_tar)
+
         if File.exists?(extracted_path) do
           {:ok, extracted_path}
         else
           :error
         end
+
       {output, _} ->
         Mix.shell().info("❌ tar extraction failed: #{output}")
         :error
@@ -607,52 +889,58 @@ defmodule NervesBootstrap.DefconfigProcessor do
   defp update_nerves_defconfig_for_custom_kernel(nerves_defconfig_path, kernel_version) do
     content = File.read!(nerves_defconfig_path)
 
-    updated_content = content
-    # Remove only conflicting kernel config options, keep Git repo info
-    |> String.replace(~r/BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y/, "")
-    |> String.replace(~r/BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="[^"]*"/, "")
+    updated_content =
+      content
+      # Remove only conflicting kernel config options, keep Git repo info
+      |> String.replace(~r/BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y/, "")
+      |> String.replace(~r/BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="[^"]*"/, "")
 
     # Try different anchoring points to add the custom config file reference
-    updated_content = cond do
-      # First try: after custom repo version (for Git-based kernels)
-      String.contains?(updated_content, "BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION=") ->
-        String.replace(
-          updated_content,
-          ~r/(BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="[^"]*")/,
-          "\\1\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\""
-        )
+    updated_content =
+      cond do
+        # First try: after custom repo version (for Git-based kernels)
+        String.contains?(updated_content, "BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION=") ->
+          String.replace(
+            updated_content,
+            ~r/(BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="[^"]*")/,
+            "\\1\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\""
+          )
 
-      # Second try: after custom version value (for version-based kernels)
-      String.contains?(updated_content, "BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=") ->
-        String.replace(
-          updated_content,
-          ~r/(BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="[^"]*")/,
-          "\\1\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\""
-        )
+        # Second try: after custom version value (for version-based kernels)
+        String.contains?(updated_content, "BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=") ->
+          String.replace(
+            updated_content,
+            ~r/(BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="[^"]*")/,
+            "\\1\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\""
+          )
 
-      # Third try: after use custom config (for custom config kernels)
-      String.contains?(updated_content, "BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y") ->
-        String.replace(
-          updated_content,
-          "BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y",
-          "BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\""
-        )
+        # Third try: after use custom config (for custom config kernels)
+        String.contains?(updated_content, "BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y") ->
+          String.replace(
+            updated_content,
+            "BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y",
+            "BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\""
+          )
 
-      # Last fallback: after basic kernel enable
-      String.contains?(updated_content, "BR2_LINUX_KERNEL=y") ->
-        String.replace(
-          updated_content,
-          "BR2_LINUX_KERNEL=y",
-          "BR2_LINUX_KERNEL=y\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\""
-        )
+        # Last fallback: after basic kernel enable
+        String.contains?(updated_content, "BR2_LINUX_KERNEL=y") ->
+          String.replace(
+            updated_content,
+            "BR2_LINUX_KERNEL=y",
+            "BR2_LINUX_KERNEL=y\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\""
+          )
 
-      # If nothing found, append at the end
-      true ->
-        updated_content <> "\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\"\n"
-    end
+        # If nothing found, append at the end
+        true ->
+          updated_content <>
+            "\nBR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE=\"${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig\"\n"
+      end
 
     File.write!(nerves_defconfig_path, updated_content)
-    Mix.shell().info("✅ Updated nerves_defconfig to use custom kernel config: ${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig")
+
+    Mix.shell().info(
+      "✅ Updated nerves_defconfig to use custom kernel config: ${NERVES_DEFCONFIG_DIR}/linux-#{kernel_version}.defconfig"
+    )
   end
 
   # Validates kernel version against what's supported by the local Buildroot version.
@@ -667,19 +955,24 @@ defmodule NervesBootstrap.DefconfigProcessor do
       requested_major_minor = extract_major_minor_version(kernel_version)
 
       # Try to find a version with same major.minor
-      compatible_version = supported_versions
-      |> Enum.filter(fn v -> extract_major_minor_version(v) == requested_major_minor end)
-      |> Enum.sort_by(&version_to_sortable/1, :desc)
-      |> List.first()
+      compatible_version =
+        supported_versions
+        |> Enum.filter(fn v -> extract_major_minor_version(v) == requested_major_minor end)
+        |> Enum.sort_by(&version_to_sortable/1, :desc)
+        |> List.first()
 
       case compatible_version do
         nil ->
           # No compatible version found, use the highest supported version
-          latest_supported = supported_versions
-          |> Enum.sort_by(&version_to_sortable/1, :desc)
-          |> List.first()
+          latest_supported =
+            supported_versions
+            |> Enum.sort_by(&version_to_sortable/1, :desc)
+            |> List.first()
 
-          Mix.shell().info("⚠️ No compatible kernel version found for #{kernel_version}, using latest supported: #{latest_supported}")
+          Mix.shell().info(
+            "⚠️ No compatible kernel version found for #{kernel_version}, using latest supported: #{latest_supported}"
+          )
+
           latest_supported || get_default_kernel_version_for_buildroot(buildroot_path)
 
         version ->
@@ -699,41 +992,51 @@ defmodule NervesBootstrap.DefconfigProcessor do
       Path.join([buildroot_path, "linux", "linux.hash"])
     ]
 
-    versions_from_file = Enum.find_value(potential_paths, fn path ->
-      if File.exists?(path) do
-        content = File.read!(path)
+    versions_from_file =
+      Enum.find_value(potential_paths, fn path ->
+        if File.exists?(path) do
+          content = File.read!(path)
 
-        # Extract versions from hash file
-        # Format: sha256 hash_value linux-X.Y.Z.tar.xz
-        versions = content
-        |> String.split("\n")
-        |> Enum.filter(fn line -> String.contains?(line, "linux-") and String.ends_with?(line, ".tar.xz") end)
-        |> Enum.map(fn line ->
-          case Regex.run(~r/linux-([0-9]+\.[0-9]+\.[0-9]+)\.tar\.xz/, line) do
-            [_, version] -> version
-            _ -> nil
+          # Extract versions from hash file
+          # Format: sha256 hash_value linux-X.Y.Z.tar.xz
+          versions =
+            content
+            |> String.split("\n")
+            |> Enum.filter(fn line ->
+              String.contains?(line, "linux-") and String.ends_with?(line, ".tar.xz")
+            end)
+            |> Enum.map(fn line ->
+              case Regex.run(~r/linux-([0-9]+\.[0-9]+\.[0-9]+)\.tar\.xz/, line) do
+                [_, version] -> version
+                _ -> nil
+              end
+            end)
+            |> Enum.filter(&(&1 != nil))
+            |> Enum.uniq()
+            |> Enum.sort_by(&version_to_sortable/1, :desc)
+
+          if length(versions) > 0 do
+            Mix.shell().info(
+              "📋 Found #{length(versions)} supported kernel versions in Buildroot #{path}"
+            )
+
+            versions
+          else
+            nil
           end
-        end)
-        |> Enum.filter(&(&1 != nil))
-        |> Enum.uniq()
-        |> Enum.sort_by(&version_to_sortable/1, :desc)
-
-        if length(versions) > 0 do
-          Mix.shell().info("📋 Found #{length(versions)} supported kernel versions in Buildroot #{path}")
-          versions
         else
           nil
         end
-      else
-        nil
-      end
-    end)
+      end)
 
     # Use file versions if found, otherwise fallback to known LTS versions
     if versions_from_file do
       versions_from_file
     else
-      Mix.shell().info("⚠️ Could not find kernel version information in Buildroot, using known LTS versions")
+      Mix.shell().info(
+        "⚠️ Could not find kernel version information in Buildroot, using known LTS versions"
+      )
+
       ["6.6.93", "6.6.58", "6.1.114", "5.15.170", "5.10.227", "5.4.285", "4.19.323"]
     end
   end
@@ -743,11 +1046,12 @@ defmodule NervesBootstrap.DefconfigProcessor do
     supported_versions = get_supported_kernel_versions_from_hash(buildroot_path)
 
     # Try to find an LTS version first (6.6, 6.1, 5.15, 5.10, 5.4, 4.19)
-    lts_version = supported_versions
-    |> Enum.find(fn version ->
-      major_minor = extract_major_minor_version(version)
-      major_minor in ["6.6", "6.1", "5.15", "5.10", "5.4", "4.19"]
-    end)
+    lts_version =
+      supported_versions
+      |> Enum.find(fn version ->
+        major_minor = extract_major_minor_version(version)
+        major_minor in ["6.6", "6.1", "5.15", "5.10", "5.4", "4.19"]
+      end)
 
     lts_version || List.first(supported_versions) || "6.1.55"
   end
@@ -760,57 +1064,178 @@ defmodule NervesBootstrap.DefconfigProcessor do
     end
   end
 
-  defp version_to_sortable(version) do
-    version
-    |> String.split(".")
-    |> Enum.map(&String.to_integer/1)
-    |> List.to_tuple()
+  # Deduplicates Buildroot defconfig lines. When the same config key appears
+  # multiple times, the last occurrence wins (so Nerves additions override
+  # original defconfig values). Comments and blank lines are preserved.
+  defp deduplicate_defconfig(content) do
+    lines = String.split(content, "\n")
+
+    # Walk lines in reverse so the last occurrence of each key is kept
+    {deduped_reversed, _seen} =
+      lines
+      |> Enum.reverse()
+      |> Enum.reduce({[], MapSet.new()}, fn line, {acc, seen} ->
+        trimmed = String.trim(line)
+
+        cond do
+          # Keep blank lines and comments
+          trimmed == "" or String.starts_with?(trimmed, "#") ->
+            {[line | acc], seen}
+
+          # Config line: extract key (part before "=")
+          true ->
+            key =
+              case String.split(trimmed, "=", parts: 2) do
+                [k, _] -> k
+                [k] -> k
+              end
+
+            if MapSet.member?(seen, key) do
+              # Skip this duplicate (earlier occurrence)
+              {acc, seen}
+            else
+              {[line | acc], MapSet.put(seen, key)}
+            end
+        end
+      end)
+
+    # deduped_reversed is already in correct order (we prepended to acc while
+    # iterating reversed lines, so the result is forward-ordered)
+    Enum.join(deduped_reversed, "\n")
   end
 
-  # Creates a minimal kernel configuration for custom kernels where we don't have a specific defconfig
-  defp create_minimal_kernel_config(target_path, kernel_version) do
+  defp version_to_sortable(version) do
+    parts =
+      version
+      |> String.split(".")
+      |> Enum.map(&String.to_integer/1)
+
+    # Normalize to {major, minor, patch} for consistent comparison
+    case parts do
+      [major] -> {major, 0, 0}
+      [major, minor] -> {major, minor, 0}
+      [major, minor, patch | _] -> {major, minor, patch}
+    end
+  end
+
+  # Creates a minimal kernel configuration for custom kernels where we don't have a specific defconfig.
+  # The arch parameter should be the Buildroot arch string from the defconfig content
+  # (used to call determine_kernel_arch_from_defconfig/1).
+  defp create_minimal_kernel_config(target_path, kernel_version, arch) do
+    arch_config = arch_specific_kernel_config(arch)
+
     minimal_kernel_config = """
-# Minimal kernel configuration for custom kernel #{kernel_version}
-CONFIG_64BIT=y
-CONFIG_ARM64=y
-CONFIG_MMU=y
-CONFIG_MODULES=y
-CONFIG_PRINTK=y
-CONFIG_TTY=y
-CONFIG_SERIAL_8250=y
-CONFIG_SERIAL_8250_CONSOLE=y
-CONFIG_EARLY_PRINTK=y
-CONFIG_NET=y
-CONFIG_INET=y
-CONFIG_PACKET=y
-CONFIG_UNIX=y
-CONFIG_SYSFS=y
-CONFIG_PROC_FS=y
-CONFIG_TMPFS=y
-CONFIG_DEVTMPFS=y
-CONFIG_DEVTMPFS_MOUNT=y
-CONFIG_EXT4_FS=y
-CONFIG_FAT_FS=y
-CONFIG_VFAT_FS=y
-CONFIG_NLS_CODEPAGE_437=y
-CONFIG_NLS_ISO8859_1=y
+    # Minimal kernel configuration for custom kernel #{kernel_version} (#{arch})
+    #{arch_config}
+    CONFIG_MMU=y
+    CONFIG_MODULES=y
+    CONFIG_PRINTK=y
+    CONFIG_TTY=y
+    CONFIG_SERIAL_8250=y
+    CONFIG_SERIAL_8250_CONSOLE=y
+    CONFIG_EARLY_PRINTK=y
+    CONFIG_NET=y
+    CONFIG_INET=y
+    CONFIG_PACKET=y
+    CONFIG_UNIX=y
+    CONFIG_SYSFS=y
+    CONFIG_PROC_FS=y
+    CONFIG_TMPFS=y
+    CONFIG_DEVTMPFS=y
+    CONFIG_DEVTMPFS_MOUNT=y
+    CONFIG_EXT4_FS=y
+    CONFIG_FAT_FS=y
+    CONFIG_VFAT_FS=y
+    CONFIG_NLS_CODEPAGE_437=y
+    CONFIG_NLS_ISO8859_1=y
 
-# --- Nerves filesystem support ---
-CONFIG_F2FS_FS=y
-CONFIG_SQUASHFS=y
-CONFIG_SQUASHFS_LZ4=y
+    # --- Nerves filesystem support ---
+    CONFIG_F2FS_FS=y
+    CONFIG_SQUASHFS=y
+    CONFIG_SQUASHFS_LZ4=y
 
-# --- USB ETH support ---
-CONFIG_USB_GADGET=y
-CONFIG_USB_ETH=y
-"""
+    # --- USB ETH support ---
+    CONFIG_USB_GADGET=y
+    CONFIG_USB_ETH=y
+    """
 
     File.write!(target_path, minimal_kernel_config)
-    Mix.shell().info("✅ Created minimal kernel config for custom kernel #{kernel_version}")
+
+    Mix.shell().info(
+      "✅ Created minimal kernel config for custom kernel #{kernel_version} (#{arch})"
+    )
+  end
+
+  defp arch_specific_kernel_config("arm64") do
+    """
+    CONFIG_64BIT=y
+    CONFIG_ARM64=y
+    """
+    |> String.trim()
+  end
+
+  defp arch_specific_kernel_config("arm") do
+    """
+    CONFIG_ARM=y
+    CONFIG_AEABI=y
+    CONFIG_CPU_V7=y
+    CONFIG_VFP=y
+    CONFIG_NEON=y
+    """
+    |> String.trim()
+  end
+
+  defp arch_specific_kernel_config("x86") do
+    """
+    CONFIG_64BIT=y
+    CONFIG_X86_64=y
+    CONFIG_SMP=y
+    """
+    |> String.trim()
+  end
+
+  defp arch_specific_kernel_config("riscv") do
+    """
+    CONFIG_64BIT=y
+    CONFIG_RISCV=y
+    CONFIG_ARCH_RV64I=y
+    CONFIG_SMP=y
+    """
+    |> String.trim()
+  end
+
+  defp arch_specific_kernel_config("mips") do
+    """
+    CONFIG_MIPS=y
+    CONFIG_CPU_MIPS32_R2=y
+    """
+    |> String.trim()
+  end
+
+  defp arch_specific_kernel_config("powerpc") do
+    """
+    CONFIG_PPC=y
+    CONFIG_PPC64=y
+    """
+    |> String.trim()
+  end
+
+  defp arch_specific_kernel_config(_) do
+    """
+    CONFIG_64BIT=y
+    CONFIG_ARM64=y
+    """
+    |> String.trim()
   end
 
   # Clones a custom kernel Git repository and extracts the appropriate defconfig
-  defp clone_and_extract_kernel_defconfig(repo_url, repo_version, defconfig, target_defconfig_path, _kernel_version) do
+  defp clone_and_extract_kernel_defconfig(
+         repo_url,
+         repo_version,
+         defconfig,
+         target_defconfig_path,
+         _kernel_version
+       ) do
     # Create a temporary directory for kernel repository
     temp_dir = System.tmp_dir!() |> Path.join("kernel_repo_#{:erlang.system_time()}")
 
@@ -818,7 +1243,11 @@ CONFIG_USB_ETH=y
       Mix.shell().info("📥 Cloning custom kernel repository: #{repo_url} (#{repo_version})")
 
       # Clone the repository with the specific branch/tag
-      case System.cmd("git", ["clone", "--branch", repo_version, "--depth", "1", repo_url, temp_dir], stderr_to_stdout: true) do
+      case System.cmd(
+             "git",
+             ["clone", "--branch", repo_version, "--depth", "1", repo_url, temp_dir],
+             stderr_to_stdout: true
+           ) do
         {_, 0} ->
           Mix.shell().info("✅ Successfully cloned kernel repository")
 
@@ -828,7 +1257,10 @@ CONFIG_USB_ETH=y
           # Find the appropriate defconfig in the repository
           case find_kernel_defconfig_in_repo(temp_dir, arch_name, defconfig) do
             {:ok, found_defconfig_path} ->
-              Mix.shell().info("📋 Found kernel defconfig: #{Path.relative_to(found_defconfig_path, temp_dir)}")
+              Mix.shell().info(
+                "📋 Found kernel defconfig: #{Path.relative_to(found_defconfig_path, temp_dir)}"
+              )
+
               File.cp!(found_defconfig_path, target_defconfig_path)
               add_nerves_kernel_configs(target_defconfig_path)
               :ok
@@ -860,7 +1292,8 @@ CONFIG_USB_ETH=y
       defconfig =~ "BR2_riscv=y" -> "riscv"
       defconfig =~ "BR2_mips=y" -> "mips"
       defconfig =~ "BR2_powerpc=y" -> "powerpc"
-      true -> "arm64"  # Default fallback for Arduino Uno Q
+      # Default fallback for Arduino Uno Q
+      true -> "arm64"
     end
   end
 
@@ -883,9 +1316,10 @@ CONFIG_USB_ETH=y
     ]
 
     # Find the first existing config
-    found_config = Enum.find(potential_paths, fn path ->
-      path && File.exists?(path)
-    end)
+    found_config =
+      Enum.find(potential_paths, fn path ->
+        path && File.exists?(path)
+      end)
 
     case found_config do
       nil -> :error
@@ -900,6 +1334,7 @@ CONFIG_USB_ETH=y
     case Regex.run(~r/BR2_LINUX_KERNEL_DEFCONFIG="([^"]+)"/, defconfig) do
       [_, defconfig_name] ->
         Path.join([repo_dir, "arch", arch_name, "configs", "#{defconfig_name}_defconfig"])
+
       _ ->
         nil
     end
@@ -914,17 +1349,23 @@ CONFIG_USB_ETH=y
     if File.exists?(configs_dir) do
       # Look for patterns that might match our board
       potential_configs = [
-        "qcom_defconfig",      # For Qualcomm boards like Arduino Uno Q
-        "imx_defconfig",       # For i.MX boards
-        "sunxi_defconfig",     # For Allwinner boards
-        "bcm2835_defconfig",   # For Raspberry Pi
-        "versatile_defconfig"  # Generic ARM
+        # For Qualcomm boards like Arduino Uno Q
+        "qcom_defconfig",
+        # For i.MX boards
+        "imx_defconfig",
+        # For Allwinner boards
+        "sunxi_defconfig",
+        # For Raspberry Pi
+        "bcm2835_defconfig",
+        # Generic ARM
+        "versatile_defconfig"
       ]
 
-      found_config = Enum.find(potential_configs, fn config_name ->
-        config_path = Path.join(configs_dir, config_name)
-        File.exists?(config_path)
-      end)
+      found_config =
+        Enum.find(potential_configs, fn config_name ->
+          config_path = Path.join(configs_dir, config_name)
+          File.exists?(config_path)
+        end)
 
       case found_config do
         nil -> nil

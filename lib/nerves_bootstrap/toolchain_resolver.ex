@@ -95,13 +95,15 @@ defmodule NervesBootstrap.ToolchainResolver do
         else
           Mix.shell().info("✅ Found release #{target_release["tag_name"]}")
 
-          # Find the asset matching our architecture and linux_x86_64 platform
+          # Find the asset matching our architecture and host platform
+          host_plat = host_platform()
+
           target_asset =
             Enum.find(target_release["assets"], fn asset ->
               asset_name = asset["name"]
 
               String.contains?(asset_name, arch_name) and
-                String.contains?(asset_name, "linux_x86_64") and
+                String.contains?(asset_name, host_plat) and
                 String.ends_with?(asset_name, ".tar.xz")
             end)
 
@@ -109,7 +111,7 @@ defmodule NervesBootstrap.ToolchainResolver do
             available_assets = Enum.map(target_release["assets"], & &1["name"]) |> Enum.join(", ")
 
             Mix.shell().error(
-              "❌ Could not find #{arch_name}-linux_x86_64 toolchain in release #{target_release["tag_name"]}"
+              "❌ Could not find #{arch_name}-#{host_plat} toolchain in release #{target_release["tag_name"]}"
             )
 
             Mix.shell().info("📋 Available assets: #{available_assets}")
@@ -225,6 +227,18 @@ defmodule NervesBootstrap.ToolchainResolver do
       """)
     end
 
+    host_plat = host_platform()
+
+    url =
+      "https://github.com/nerves-project/toolchains/releases/download/v#{version_number}/nerves_toolchain_#{arch_name}-#{host_plat}-#{version_number}-#{hash}.tar.xz"
+
+    Mix.shell().info("🔗 Generated fallback URL: #{url}")
+    url
+  end
+
+  # Detects the host platform for toolchain asset matching.
+  # Returns a string like "linux_x86_64", "linux_aarch64", "darwin_x86_64", etc.
+  defp host_platform do
     host_arch =
       case :erlang.system_info(:system_architecture) |> List.to_string() do
         "x86_64" <> _ -> "x86_64"
@@ -232,10 +246,13 @@ defmodule NervesBootstrap.ToolchainResolver do
         _ -> "x86_64"
       end
 
-    url =
-      "https://github.com/nerves-project/toolchains/releases/download/v#{version_number}/nerves_toolchain_#{arch_name}-linux_#{host_arch}-#{version_number}-#{hash}.tar.xz"
+    host_os =
+      case :os.type() do
+        {:unix, :darwin} -> "darwin"
+        {:unix, _} -> "linux"
+        {:win32, _} -> "linux"
+      end
 
-    Mix.shell().info("🔗 Generated fallback URL: #{url}")
-    url
+    "#{host_os}_#{host_arch}"
   end
 end

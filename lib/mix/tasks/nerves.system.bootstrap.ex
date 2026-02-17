@@ -90,12 +90,8 @@ defmodule Mix.Tasks.Nerves.System.Bootstrap do
     File.mkdir_p!(app)
     target_defconfig = Path.join(app, "nerves_defconfig")
 
-    # Copy and process the defconfig for Nerves
-    File.cp!(defconfig_path, target_defconfig)
-    DefconfigProcessor.clean_defconfig_for_nerves(target_defconfig)
-    DefconfigProcessor.append_nerves_config(target_defconfig)
-    DefconfigProcessor.append_external_reference(target_defconfig, buildroot_path)
-    DefconfigProcessor.append_nerves_system_name(target_defconfig, app)
+    # Process the defconfig for Nerves in a single pass
+    DefconfigProcessor.prepare_nerves_defconfig(defconfig_path, target_defconfig, app)
 
     # Copy kernel defconfig
     DefconfigProcessor.copy_kernel_defconfig(defconfig_path, buildroot_path, app)
