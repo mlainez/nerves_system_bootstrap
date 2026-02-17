@@ -21,8 +21,12 @@ defmodule NervesBootstrap.PlatformDetector do
       defconfig_content =~ "BR2_aarch64=y" ->
         {:nerves_toolchain_aarch64_nerves_linux_gnu, "~> 14.2"}
 
-      defconfig_content =~ "BR2_arm=y" and defconfig_content =~ "BR2_ARM_EABIHF=y" ->
-        {:nerves_toolchain_armv7_nerves_linux_gnueabihf, "~> 14.2"}
+      defconfig_content =~ "BR2_arm=y" ->
+        if arm_is_v6?(defconfig_content) do
+          {:nerves_toolchain_armv6_nerves_linux_gnueabihf, "~> 14.2"}
+        else
+          {:nerves_toolchain_armv7_nerves_linux_gnueabihf, "~> 14.2"}
+        end
 
       defconfig_content =~ "BR2_x86_64=y" ->
         {:nerves_toolchain_x86_64_nerves_linux_musl, "~> 14.2"}
@@ -33,6 +37,18 @@ defmodule NervesBootstrap.PlatformDetector do
       true ->
         {:nerves_toolchain_armv7_nerves_linux_gnueabihf, "~> 14.2"}
     end
+  end
+
+  # Checks if an ARM 32-bit defconfig targets an armv6 core.
+  # The armv6 cores in Buildroot are: arm1136j_s, arm1136jf_s,
+  # arm1176jz_s, arm1176jzf_s, arm11mpcore.
+  # Everything else (cortex-A*) is armv7 or higher.
+  defp arm_is_v6?(defconfig_content) do
+    defconfig_content =~ "BR2_arm1136j_s=y" or
+      defconfig_content =~ "BR2_arm1136jf_s=y" or
+      defconfig_content =~ "BR2_arm1176jz_s=y" or
+      defconfig_content =~ "BR2_arm1176jzf_s=y" or
+      defconfig_content =~ "BR2_arm11mpcore=y"
   end
 
   @doc """

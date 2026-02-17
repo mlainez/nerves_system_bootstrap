@@ -493,13 +493,20 @@ defmodule NervesBootstrap.DefconfigProcessor do
     end
   end
 
-  defp get_toolchain_prefix(defconfig) do
-    case detect_kernel_arch(defconfig) do
-      "arm64" -> "aarch64-nerves-linux-gnu"
-      "arm" -> "arm-nerves-linux-gnueabihf"
-      "x86" -> "x86_64-nerves-linux-musl"
-      "riscv" -> "riscv64-nerves-linux-gnu"
-      _ -> "arm-nerves-linux-gnueabihf"
+  # Derives the toolchain prefix from the toolchain name atom.
+  # The cross-compilation tuple format is {arch}-nerves-linux-{abi},
+  # e.g. "armv7-nerves-linux-gnueabihf" or "x86_64-nerves-linux-musl".
+  # The atom encodes this with underscores, so we split on "_nerves_linux_"
+  # and rejoin with hyphens, preserving underscores within the arch name.
+  defp get_toolchain_prefix(toolchain_name) do
+    base =
+      toolchain_name
+      |> Atom.to_string()
+      |> String.replace_prefix("nerves_toolchain_", "")
+
+    case String.split(base, "_nerves_linux_", parts: 2) do
+      [arch, abi] -> "#{arch}-nerves-linux-#{abi}"
+      _ -> String.replace(base, "_", "-")
     end
   end
 
@@ -560,7 +567,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
       NervesBootstrap.PlatformDetector.infer_toolchain_from_content(content)
 
     toolchain_url = NervesBootstrap.ToolchainResolver.get_toolchain_url(toolchain_name, version)
-    toolchain_prefix = get_toolchain_prefix(content)
+    toolchain_prefix = get_toolchain_prefix(toolchain_name)
     gcc_version_config = get_gcc_version_config(toolchain_url)
     c_lib_config = get_c_library_config(toolchain_prefix)
 
