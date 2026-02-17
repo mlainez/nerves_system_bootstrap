@@ -547,7 +547,8 @@ defmodule NervesBootstrap.DefconfigProcessor do
         String.starts_with?(line, "BR2_ROOTFS_OVERLAY=") or
         String.starts_with?(line, "BR2_ROOTFS_POST_BUILD_SCRIPT=") or
         String.starts_with?(line, "BR2_ROOTFS_POST_IMAGE_SCRIPT=") or
-        String.starts_with?(line, "BR2_ROOTFS_POST_SCRIPT_ARGS=")
+        String.starts_with?(line, "BR2_ROOTFS_POST_SCRIPT_ARGS=") or
+        String.starts_with?(line, "BR2_DOWNLOAD_FORCE_CHECK_HASHES=")
     end)
     |> Enum.join("\n")
   end
