@@ -44,7 +44,7 @@ defmodule NervesBootstrap.DefconfigProcessor do
               "Kernel version #{version} not supported by this Buildroot version, using #{validated_version}"
             )
 
-            # Update defconfig with the validated version
+            # Update the source defconfig with the validated version
             updated_defconfig =
               String.replace(
                 initial_defconfig,
@@ -54,9 +54,23 @@ defmodule NervesBootstrap.DefconfigProcessor do
 
             File.write!(defconfig_path, updated_defconfig)
 
-            Mix.shell().info(
-              "✅ Updated #{defconfig_path} with kernel version #{validated_version}"
-            )
+            # Also update the already-written nerves_defconfig
+            nerves_defconfig = Path.join(target_dir, "nerves_defconfig")
+
+            if File.exists?(nerves_defconfig) do
+              nerves_content = File.read!(nerves_defconfig)
+
+              updated_nerves =
+                String.replace(
+                  nerves_content,
+                  "BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=\"#{version}\"",
+                  "BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=\"#{validated_version}\""
+                )
+
+              File.write!(nerves_defconfig, updated_nerves)
+            end
+
+            Mix.shell().info("✅ Updated kernel version to #{validated_version}")
 
             validated_version
           else
