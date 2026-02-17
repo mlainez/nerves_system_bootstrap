@@ -67,6 +67,12 @@ defmodule NervesBootstrap.FileGenerator do
     # Generate GUIDs for GPT partitions
     partition_guids = generate_partition_guids(platform_config)
 
+    # Estimate boot partition size dynamically
+    boot_part_blocks =
+      NervesBootstrap.PlatformDetector.estimate_boot_partition_blocks(platform_config)
+
+    boot_part_mib = div(boot_part_blocks, 2048)
+
     [
       app: app,
       board: board,
@@ -79,6 +85,8 @@ defmodule NervesBootstrap.FileGenerator do
       dtso_names: dtso_names,
       partition_guids: partition_guids,
       custom_packages: custom_packages,
+      boot_part_blocks: boot_part_blocks,
+      boot_part_mib: boot_part_mib,
       dep_string: fn {name, version} -> "{:#{name}, \"#{version}\", runtime: false}" end,
       architecture: get_architecture(toolchain_dep),
       # This could be configurable

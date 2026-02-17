@@ -127,8 +127,10 @@ define(UBOOT_ENV_COUNT, 256)     # 128KB for env
 <% end %>
 
 <%= if Map.get(platform_config, :needs_boot_partition, true) do %>
-# Boot partitions (for platforms that need them)
-define(BOOT_A_PART_COUNT, <%= Map.get(platform_config, :boot_part_count, 38630) %>)
+# Boot partitions hold the kernel, DTBs, boot scripts, and platform firmware.
+# Sized to <%= boot_part_mib %> MiB based on estimated boot contents with 2x safety margin.
+# Increase this if your kernel or boot files grow beyond the default estimate.
+define(BOOT_A_PART_COUNT, <%= boot_part_blocks %>)
 define-eval(BOOT_B_PART_OFFSET, "${BOOT_A_PART_OFFSET} + ${BOOT_A_PART_COUNT}")
 define(BOOT_B_PART_COUNT, ${BOOT_A_PART_COUNT})
 
