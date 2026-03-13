@@ -94,10 +94,10 @@ defmodule Mix.Tasks.Nerves.System.Bootstrap do
     DefconfigProcessor.prepare_nerves_defconfig(defconfig_path, target_defconfig, app)
 
     # Copy kernel defconfig
-    DefconfigProcessor.copy_kernel_defconfig(defconfig_path, buildroot_path, app)
+    DefconfigProcessor.copy_kernel_defconfig(defconfig_path, buildroot_path, app, external_path)
 
     # Copy U-Boot configuration fragments
-    DefconfigProcessor.copy_uboot_fragments(target_defconfig, buildroot_path, app)
+    DefconfigProcessor.copy_uboot_fragments(target_defconfig, buildroot_path, app, external_path)
 
     # Resolve toolchain and generate all files
     toolchain_dep = PlatformDetector.infer_toolchain(defconfig_path)

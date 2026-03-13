@@ -32,14 +32,16 @@ defmodule NervesBootstrap.FileGenerator do
         toolchain_dep,
         buildroot_path,
         defconfig_path,
-        custom_packages
+        custom_packages,
+        external_path
       )
 
     # Generate files from templates
     generate_from_templates(app, binding)
 
     # Copy additional files from buildroot board directory
-    copy_buildroot_board_files(buildroot_path, board, app, binding)
+    # Search external tree first when available
+    copy_buildroot_board_files(buildroot_path, board, app, binding, external_path)
 
     # Create additional directories that might be needed
     create_additional_directories(app)
@@ -52,7 +54,8 @@ defmodule NervesBootstrap.FileGenerator do
          toolchain_dep,
          buildroot_path,
          defconfig_path,
-         custom_packages
+         custom_packages,
+         external_path
        ) do
     nerves_defconfig_path = Path.join(app, "nerves_defconfig")
     platform_config = NervesBootstrap.PlatformDetector.detect_platform_config(defconfig_path)
@@ -60,7 +63,13 @@ defmodule NervesBootstrap.FileGenerator do
 
     # Analyze genimage config to update platform_config with partition scheme
     platform_config =
-      analyze_and_update_platform_config(platform_config, buildroot_path, board, defconfig_path)
+      analyze_and_update_platform_config(
+        platform_config,
+        buildroot_path,
+        board,
+        defconfig_path,
+        external_path
+      )
 
     # Extract DTSO names from nerves_defconfig if it exists
     dtso_names = extract_dtso_names(nerves_defconfig_path)
@@ -249,11 +258,22 @@ defmodule NervesBootstrap.FileGenerator do
     end
   end
 
-  defp analyze_and_update_platform_config(platform_config, buildroot_path, board, defconfig_path) do
-    # Try to find board directory: first from defconfig content, then by name matching
+  defp analyze_and_update_platform_config(
+         platform_config,
+         buildroot_path,
+         board,
+         defconfig_path,
+         external_path
+       ) do
+    # Try to find board directory: first from defconfig content, then by name matching.
+    # When an external tree is provided, search it first.
     board_dir =
-      extract_board_dir_from_defconfig(buildroot_path, defconfig_path) ||
-        find_buildroot_board_directory(buildroot_path, board)
+      find_board_dir_with_external_priority(
+        buildroot_path,
+        board,
+        defconfig_path,
+        external_path
+      )
 
     case board_dir do
       nil ->
@@ -265,10 +285,38 @@ defmodule NervesBootstrap.FileGenerator do
     end
   end
 
+  # Searches for the board directory, trying the external tree first when available.
+  defp find_board_dir_with_external_priority(buildroot_path, board, defconfig_path, external_path) do
+    if external_path do
+      # Try external tree first
+      external_result =
+        extract_board_dir_from_defconfig(external_path, defconfig_path, external_path) ||
+          find_buildroot_board_directory(external_path, board)
+
+      case external_result do
+        nil ->
+          # Fall back to Buildroot tree
+          extract_board_dir_from_defconfig(buildroot_path, defconfig_path, external_path) ||
+            find_buildroot_board_directory(buildroot_path, board)
+
+        dir ->
+          Mix.shell().info("Found board directory in external tree: #{dir}")
+          dir
+      end
+    else
+      extract_board_dir_from_defconfig(buildroot_path, defconfig_path, nil) ||
+        find_buildroot_board_directory(buildroot_path, board)
+    end
+  end
+
   # Extracts the board directory from defconfig content by looking at
   # BR2_ROOTFS_POST_BUILD_SCRIPT, BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE, etc.
   # These paths explicitly reference the board directory (e.g., "board/qemu/x86_64/post-build.sh").
-  defp extract_board_dir_from_defconfig(buildroot_path, defconfig_path) do
+  #
+  # Buildroot external tree defconfigs use Make variables like
+  # $(BR2_EXTERNAL_<NAME>_PATH) which we expand to `external_path` so that
+  # directory lookups succeed outside of a real Make invocation.
+  defp extract_board_dir_from_defconfig(base_path, defconfig_path, external_path) do
     content = File.read!(defconfig_path)
 
     # Try multiple keys that reference board directories
@@ -297,15 +345,34 @@ defmodule NervesBootstrap.FileGenerator do
       end)
 
     if board_dir do
-      full_path = Path.join(buildroot_path, board_dir)
+      # Expand any $(BR2_EXTERNAL_*_PATH) variables to the actual external path
+      expanded_board_dir = expand_br2_external_variables(board_dir, external_path)
+
+      full_path =
+        if Path.type(expanded_board_dir) == :absolute do
+          expanded_board_dir
+        else
+          Path.join(base_path, expanded_board_dir)
+        end
 
       if File.dir?(full_path) do
-        Mix.shell().info("Found board directory from defconfig: #{board_dir}")
+        Mix.shell().info("Found board directory from defconfig: #{full_path}")
         full_path
       else
         nil
       end
     end
+  end
+
+  # Expands Buildroot Make variables that reference external tree paths.
+  # Buildroot creates $(BR2_EXTERNAL_<NAME>_PATH) at build time; we replace
+  # them with the concrete external_path so lookups work outside of Make.
+  defp expand_br2_external_variables(path, nil), do: path
+
+  defp expand_br2_external_variables(path, external_path) do
+    path
+    |> String.replace(~r/\$\(BR2_EXTERNAL_[A-Za-z0-9_]+_PATH\)/, external_path)
+    |> String.replace(~r/\$\{BR2_EXTERNAL_[A-Za-z0-9_]+_PATH\}/, external_path)
   end
 
   defp detect_partition_scheme(platform_config, board_dir) do
@@ -342,11 +409,21 @@ defmodule NervesBootstrap.FileGenerator do
     end
   end
 
-  defp copy_buildroot_board_files(buildroot_path, board, app, binding) do
+  defp copy_buildroot_board_files(buildroot_path, board, app, binding, external_path) do
     platform_config = binding[:platform_config]
 
-    # Find buildroot board directory
-    case find_buildroot_board_directory(buildroot_path, board) do
+    # Search external tree first for board directory when available
+    board_dir =
+      if external_path do
+        case find_buildroot_board_directory(external_path, board) do
+          nil -> find_buildroot_board_directory(buildroot_path, board)
+          dir -> dir
+        end
+      else
+        find_buildroot_board_directory(buildroot_path, board)
+      end
+
+    case board_dir do
       nil ->
         Mix.shell().info("No buildroot board directory found for #{board}")
         # Generate fallback boot config if platform needs it
